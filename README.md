@@ -45,6 +45,8 @@ python app.py setup
 ## Environment
 
 - `ARA_ACCESS_TOKEN`: user JWT for control plane
+  - In the Ara app, open `Settings -> System`, then use **Auth Token -> Copy Access Token**.
+  - Paste that value into `ARA_ACCESS_TOKEN` before running SDK commands.
 
 ## Examples
 
