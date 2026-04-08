@@ -3,7 +3,7 @@ import urllib.error
 
 import pytest
 
-from ara_sdk import App, cron, runtime, sandbox
+from ara_sdk import App, Secret, cron, runtime, sandbox
 from ara_sdk import core
 
 
@@ -84,4 +84,189 @@ def test_http_error_includes_response_body_in_debug_mode(monkeypatch):
     message = str(exc.value)
     assert "GET /apps failed (504):" in message
     assert details in message
+
+
+def test_runtime_includes_env_and_secret_refs():
+    profile = runtime(
+        env={"APP_MODE": "production", "MAX_RETRIES": 3},
+        secrets=[
+            Secret.from_name("provider-shared", required_keys=["OPENAI_API_KEY"]),
+            Secret.from_dict("provider-local", {"OPENAI_API_KEY": "sk-local"}),
+            "provider-shared",
+        ],
+    )
+    assert profile["env"] == {"APP_MODE": "production", "MAX_RETRIES": "3"}
+    assert profile["secret_refs"] == [
+        {"name": "provider-shared", "required_keys": ["OPENAI_API_KEY"]},
+        {"name": "provider-local"},
+    ]
+    assert "__secret_definitions" in profile
+    assert len(profile["__secret_definitions"]) == 2
+
+
+def test_secret_rejects_reserved_keys():
+    with pytest.raises(ValueError):
+        runtime(env={"SESSION_ID": "abc"})
+    with pytest.raises(ValueError):
+        Secret.from_dict("provider-local", {"ARA_INTERNAL_TOKEN": "abc"})
+
+
+def test_secret_from_dotenv_and_local_environ(tmp_path, monkeypatch):
+    dotenv = tmp_path / ".env.secrets"
+    dotenv.write_text("OPENAI_API_KEY=sk-123\nANTHROPIC_API_KEY=an-123\n", encoding="utf-8")
+    secret = Secret.from_dotenv("provider-local", filename=str(dotenv))
+    assert secret.name == "provider-local"
+    assert secret.values == {"OPENAI_API_KEY": "sk-123", "ANTHROPIC_API_KEY": "an-123"}
+
+    monkeypatch.setenv("CAL_API_KEY", "cal-123")
+    env_secret = Secret.from_local_environ("calendar", env_keys=["CAL_API_KEY"])
+    assert env_secret.values == {"CAL_API_KEY": "cal-123"}
+
+
+class _FakeHttp:
+    def __init__(self):
+        self.calls: list[str] = []
+        self.created_payload: dict | None = None
+
+    def list_apps(self) -> dict:
+        self.calls.append("list_apps")
+        return {"apps": []}
+
+    def create_app(self, body: dict) -> dict:
+        self.calls.append("create_app")
+        self.created_payload = body
+        return {"app": {"id": "app_test_1"}}
+
+    def update_app(self, app_id: str, body: dict) -> dict:
+        self.calls.append("update_app")
+        return {"app": {"id": app_id, **body}}
+
+    def upsert_secret(self, app_id: str, *, name: str, values: dict[str, str]) -> dict:
+        _ = app_id
+        self.calls.append(f"upsert_secret:{name}")
+        return {"secret": {"name": name, "key_names": sorted(values.keys())}}
+
+    def create_key(self, app_id: str, *, name: str, requests_per_minute: int) -> dict:
+        _ = (app_id, name, requests_per_minute)
+        self.calls.append("create_key")
+        return {"key": "ak_app_test"}
+
+    def run_app(
+        self,
+        app_id: str,
+        *,
+        runtime_key: str,
+        workflow_id: str | None,
+        input_payload: dict,
+        warmup: bool = False,
+    ) -> dict:
+        _ = (app_id, runtime_key, workflow_id, input_payload, warmup)
+        self.calls.append("run_app")
+        return {"ok": True}
+
+
+def _manifest_with_runtime(runtime_profile: dict) -> dict:
+    return {
+        "name": "Test App",
+        "slug": "test-app",
+        "description": "",
+        "agent": {},
+        "workflows": [],
+        "interfaces": {},
+        "runtime_profile": runtime_profile,
+    }
+
+
+def test_deploy_syncs_local_secrets_before_warmup(tmp_path):
+    runtime_profile = runtime(
+        env={"APP_MODE": "dev"},
+        secrets=[
+            Secret.from_dict("provider-local", {"OPENAI_API_KEY": "sk-local"}),
+            Secret.from_name("provider-shared", required_keys=["OPENAI_API_KEY"]),
+        ],
+    )
+    client = core.AraClient(
+        manifest=_manifest_with_runtime(runtime_profile),
+        api_base_url="https://api.ara.so",
+        access_token="token",
+        cwd=tmp_path,
+    )
+    fake_http = _FakeHttp()
+    client.http = fake_http
+
+    out = client.deploy(warm=True, warm_workflow_id="warmup-flow")
+
+    assert fake_http.created_payload is not None
+    assert "__secret_definitions" not in fake_http.created_payload["runtime_profile"]
+    assert fake_http.created_payload["runtime_profile"]["secret_refs"] == [
+        {"name": "provider-local"},
+        {"name": "provider-shared", "required_keys": ["OPENAI_API_KEY"]},
+    ]
+    assert fake_http.calls.index("upsert_secret:provider-local") < fake_http.calls.index("run_app")
+    assert out["secrets"] == {
+        "synced": ["provider-local"],
+        "referenced_only": ["provider-shared"],
+    }
+    assert (tmp_path / ".runtime-key.local").exists()
+
+
+def test_cli_up_alias_dispatches_to_deploy(monkeypatch, capsys):
+    class _StubClient:
+        def __init__(self):
+            self.kwargs: dict | None = None
+
+        def deploy(self, **kwargs):
+            self.kwargs = kwargs
+            return {"ok": True}
+
+    stub = _StubClient()
+
+    monkeypatch.setattr(
+        core.AraClient,
+        "from_env",
+        classmethod(lambda cls, *, manifest, cwd=None: stub),
+    )
+
+    core.run_cli(
+        _manifest_with_runtime(runtime_profile={}),
+        argv=["up", "--warm", "true"],
+    )
+
+    assert stub.kwargs is not None
+    assert stub.kwargs["warm"] is True
+    assert '"ok": true' in capsys.readouterr().out.lower()
+
+
+def test_adapter_helpers_shapes():
+    artifact = core.git_artifact("https://github.com/example/repo", ref="main", subdir="worker")
+    assert artifact == {
+        "type": "git",
+        "repo_url": "https://github.com/example/repo",
+        "ref": "main",
+        "subdir": "worker",
+    }
+
+    adapter = core.command_adapter(
+        "python3 worker.py",
+        framework="custom",
+        artifact=artifact,
+        env={"FOO": "bar"},
+    )
+    assert adapter["type"] == "command"
+    assert adapter["entrypoint"] == "python3 worker.py"
+    assert adapter["artifact"]["type"] == "git"
+    assert adapter["env"]["FOO"] == "bar"
+
+    assert core.langgraph_adapter()["framework"] == "langgraph"
+    assert core.langchain_adapter()["framework"] == "langchain"
+    assert core.agno_adapter()["framework"] == "agno"
+
+
+def test_event_envelope_generates_run_and_idempotency():
+    out = core.event_envelope("channel.web.inbound", message="hello")
+    event = out["event"]
+    assert event["type"] == "channel.web.inbound"
+    assert event["message"] == "hello"
+    assert event["metadata"]["run_id"]
+    assert event["metadata"]["idempotency_key"].startswith("channel-web-inbound-")
 
