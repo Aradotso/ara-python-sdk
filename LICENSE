@@ -1,0 +1,27 @@
+Ara SDK Proprietary License
+Copyright (c) 2026 Ara. All rights reserved.
+
+This software and all associated source code, binaries, APIs, documentation,
+and examples (collectively, the "Software") are proprietary and confidential.
+
+No rights are granted except by an explicit written commercial agreement
+signed by Ara.
+
+Without Ara's prior written permission, you may NOT:
+- copy, modify, or create derivative works of the Software;
+- distribute, sublicense, sell, lease, lend, transfer, or make the Software
+  available to any third party;
+- reverse engineer, decompile, disassemble, or otherwise attempt to derive
+  source code from any non-source distribution;
+- remove or alter any proprietary notices;
+- use the Software to build, benchmark, or train a competing product.
+
+Any unauthorized use is strictly prohibited and may result in immediate
+termination of access, legal action, and/or damages.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTIES OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, OR TITLE. TO THE MAXIMUM EXTENT
+PERMITTED BY LAW, ARA SHALL NOT BE LIABLE FOR ANY INDIRECT, INCIDENTAL,
+SPECIAL, CONSEQUENTIAL, OR PUNITIVE DAMAGES, OR FOR ANY LOSS OF DATA, PROFITS,
+REVENUE, OR BUSINESS INTERRUPTION, ARISING OUT OF OR RELATED TO THE SOFTWARE.

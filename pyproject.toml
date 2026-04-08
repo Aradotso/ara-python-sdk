@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ara-sdk"
+version = "0.1.0"
+description = "Public Python SDK for building and running Ara apps."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [
+  { name = "Ara", email = "support@ara.so" }
+]
+keywords = ["ara", "ai", "agents", "sdk"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: Other/Proprietary License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries :: Python Modules"
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Aradotso/ara-python-sdk"
+Documentation = "https://docs.ara.so/sdk/overview"
+Issues = "https://github.com/Aradotso/ara-python-sdk/issues"
+
+[project.scripts]
+ara-sdk = "ara_sdk.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ara_sdk"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
