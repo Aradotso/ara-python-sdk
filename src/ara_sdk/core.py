@@ -7,6 +7,7 @@ import inspect
 import json
 import os
 import pathlib
+import re
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -19,6 +20,10 @@ DEFAULT_MAX_RETRIES = 2
 DEFAULT_RETRY_BACKOFF_SECONDS = 5
 DEBUG_HTTP_ERRORS_ENV = "ARA_SDK_DEBUG_HTTP_ERRORS"
 DEFAULT_API_BASE_URL = "https://ara-api-prd.up.railway.app"
+ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+SECRET_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}[a-z0-9]$")
+RESERVED_ENV_KEYS = frozenset({"SESSION_ID", "USER_ID", "APP_ID"})
+RESERVED_ENV_PREFIXES = ("ARA_", "MODAL_")
 
 
 def _slugify(value: str) -> str:
@@ -43,6 +48,237 @@ def _new_run_id() -> str:
 
 def _env_flag_enabled(key: str) -> bool:
     return str(os.getenv(key, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_secret_name(name: str) -> str:
+    normalized = str(name or "").strip().lower()
+    if not normalized or not SECRET_NAME_RE.match(normalized):
+        raise ValueError("Secret name must match [a-z0-9][a-z0-9_-]{0,62}[a-z0-9]")
+    return normalized
+
+
+def _validate_env_key(key: str) -> str:
+    normalized = str(key or "").strip()
+    if not normalized:
+        raise ValueError("Environment key cannot be empty")
+    if not ENV_KEY_RE.match(normalized):
+        raise ValueError(f"Invalid environment key: {normalized}")
+    if normalized in RESERVED_ENV_KEYS or any(normalized.startswith(prefix) for prefix in RESERVED_ENV_PREFIXES):
+        raise ValueError(f"Reserved environment key is not allowed: {normalized}")
+    return normalized
+
+
+def _normalize_required_keys(required_keys: Optional[list[str]]) -> list[str]:
+    if not required_keys:
+        return []
+    if not isinstance(required_keys, list):
+        raise ValueError("required_keys must be a list[str]")
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in required_keys:
+        key = _validate_env_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
+class SecretDefinition:
+    def __init__(
+        self,
+        name: str,
+        *,
+        values: Optional[dict[str, str]] = None,
+        required_keys: Optional[list[str]] = None,
+        source: str,
+    ):
+        self.name = _normalize_secret_name(name)
+        self.values = self._normalize_values(values)
+        self.required_keys = _normalize_required_keys(required_keys)
+        self.source = source
+
+    @staticmethod
+    def _normalize_values(values: Optional[dict[str, str]]) -> Optional[dict[str, str]]:
+        if values is None:
+            return None
+        if not isinstance(values, dict):
+            raise ValueError("Secret values must be a dict[str, str]")
+        if not values:
+            raise ValueError("Secret values cannot be empty")
+        out: dict[str, str] = {}
+        for raw_key, raw_value in values.items():
+            key = _validate_env_key(raw_key)
+            out[key] = "" if raw_value is None else str(raw_value)
+        return out
+
+    @classmethod
+    def from_name(cls, name: str, required_keys: Optional[list[str]] = None) -> "SecretDefinition":
+        return cls(name, required_keys=required_keys, source="name")
+
+    @classmethod
+    def from_dict(
+        cls,
+        name: str,
+        env_dict: dict[str, Any],
+        *,
+        required_keys: Optional[list[str]] = None,
+    ) -> "SecretDefinition":
+        if not isinstance(env_dict, dict) or not env_dict:
+            raise ValueError("from_dict requires a non-empty env_dict")
+        return cls(
+            name,
+            values={str(k): "" if v is None else str(v) for k, v in env_dict.items()},
+            required_keys=required_keys,
+            source="dict",
+        )
+
+    @classmethod
+    def from_dotenv(
+        cls,
+        name: str,
+        filename: str = ".env",
+        *,
+        required_keys: Optional[list[str]] = None,
+    ) -> "SecretDefinition":
+        dotenv_path = pathlib.Path(filename)
+        if not dotenv_path.exists() or not dotenv_path.is_file():
+            raise ValueError(f"Secret dotenv file not found: {dotenv_path}")
+        values: dict[str, str] = {}
+        for raw_line in dotenv_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                value = value[1:-1]
+            if key:
+                values[key] = value
+        if not values:
+            raise ValueError(f"Secret dotenv file has no key=value entries: {dotenv_path}")
+        return cls(name, values=values, required_keys=required_keys, source="dotenv")
+
+    @classmethod
+    def from_local_environ(
+        cls,
+        name: str,
+        env_keys: list[str],
+        *,
+        required_keys: Optional[list[str]] = None,
+    ) -> "SecretDefinition":
+        if not isinstance(env_keys, list) or not env_keys:
+            raise ValueError("from_local_environ requires a non-empty env_keys list")
+        values: dict[str, str] = {}
+        missing: list[str] = []
+        for raw_key in env_keys:
+            key = _validate_env_key(raw_key)
+            value = os.getenv(key)
+            if value is None:
+                missing.append(key)
+                continue
+            values[key] = str(value)
+        if missing:
+            raise ValueError(f"Missing environment variables for secret {name}: {', '.join(missing)}")
+        return cls(name, values=values, required_keys=required_keys, source="local_environ")
+
+    def ref(self) -> dict[str, Any]:
+        out = {"name": self.name}
+        if self.required_keys:
+            out["required_keys"] = list(self.required_keys)
+        return out
+
+
+class Secret:
+    @staticmethod
+    def from_name(name: str, required_keys: Optional[list[str]] = None) -> SecretDefinition:
+        return SecretDefinition.from_name(name, required_keys=required_keys)
+
+    @staticmethod
+    def from_dict(
+        name: str,
+        env_dict: dict[str, Any],
+        *,
+        required_keys: Optional[list[str]] = None,
+    ) -> SecretDefinition:
+        return SecretDefinition.from_dict(name, env_dict, required_keys=required_keys)
+
+    @staticmethod
+    def from_dotenv(
+        name: str,
+        filename: str = ".env",
+        *,
+        required_keys: Optional[list[str]] = None,
+    ) -> SecretDefinition:
+        return SecretDefinition.from_dotenv(name, filename=filename, required_keys=required_keys)
+
+    @staticmethod
+    def from_local_environ(
+        name: str,
+        env_keys: list[str],
+        *,
+        required_keys: Optional[list[str]] = None,
+    ) -> SecretDefinition:
+        return SecretDefinition.from_local_environ(name, env_keys=env_keys, required_keys=required_keys)
+
+
+def _normalize_runtime_env_map(raw_env: Optional[dict[str, Any]]) -> dict[str, str]:
+    if raw_env is None:
+        return {}
+    if not isinstance(raw_env, dict):
+        raise ValueError("runtime(env=...) expects dict[str, str]")
+    out: dict[str, str] = {}
+    for raw_key, raw_value in raw_env.items():
+        key = _validate_env_key(raw_key)
+        out[key] = "" if raw_value is None else str(raw_value)
+    return out
+
+
+def _normalize_runtime_secrets(raw_secrets: Optional[list[Any]]) -> tuple[list[dict[str, Any]], list[SecretDefinition]]:
+    if raw_secrets is None:
+        return [], []
+    if not isinstance(raw_secrets, list):
+        raise ValueError("runtime(secrets=...) expects a list")
+    refs: list[dict[str, Any]] = []
+    definitions: list[SecretDefinition] = []
+    seen_names: set[str] = set()
+    for item in raw_secrets:
+        if isinstance(item, SecretDefinition):
+            definition = item
+        elif isinstance(item, str):
+            definition = SecretDefinition.from_name(item)
+        elif isinstance(item, dict):
+            definition = SecretDefinition.from_name(
+                str(item.get("name") or ""),
+                required_keys=item.get("required_keys") if isinstance(item.get("required_keys"), list) else None,
+            )
+        else:
+            raise ValueError("runtime(secrets=...) items must be SecretDefinition, str, or dict")
+        if definition.name in seen_names:
+            continue
+        seen_names.add(definition.name)
+        refs.append(definition.ref())
+        definitions.append(definition)
+    return refs, definitions
+
+
+def _collect_runtime_secret_definitions(runtime_profile: dict[str, Any]) -> list[SecretDefinition]:
+    if not isinstance(runtime_profile, dict):
+        return []
+    raw = runtime_profile.pop("__secret_definitions", [])
+    if not isinstance(raw, list):
+        return []
+    out: list[SecretDefinition] = []
+    seen_names: set[str] = set()
+    for item in raw:
+        if not isinstance(item, SecretDefinition):
+            continue
+        if item.name in seen_names:
+            continue
+        seen_names.add(item.name)
+        out.append(item)
+    return out
 
 
 def file(path: str, content: str, *, executable: bool = False) -> dict[str, Any]:
@@ -88,6 +324,8 @@ def runtime(
     volume_size_mb: Optional[int] = None,
     python_packages: Optional[list[str]] = None,
     node_packages: Optional[list[str]] = None,
+    env: Optional[dict[str, Any]] = None,
+    secrets: Optional[list[Any]] = None,
 ) -> dict[str, Any]:
     profile: dict[str, Any] = {}
     if files:
@@ -104,6 +342,13 @@ def runtime(
         profile["python_packages"] = [str(pkg).strip() for pkg in python_packages if str(pkg).strip()]
     if node_packages:
         profile["node_packages"] = [str(pkg).strip() for pkg in node_packages if str(pkg).strip()]
+    if env is not None:
+        profile["env"] = _normalize_runtime_env_map(env)
+    if secrets is not None:
+        secret_refs, secret_defs = _normalize_runtime_secrets(secrets)
+        profile["secret_refs"] = secret_refs
+        if secret_defs:
+            profile["__secret_definitions"] = secret_defs
     return profile
 
 
@@ -156,6 +401,154 @@ def subagent_hook(
     if schedule is not None:
         out["schedule"] = schedule
     return out
+
+
+def git_artifact(
+    repo_url: str,
+    *,
+    ref: str = "main",
+    subdir: str = "",
+) -> dict[str, Any]:
+    url = str(repo_url or "").strip()
+    if not url:
+        raise ValueError("git_artifact() requires a non-empty repo_url")
+    return {
+        "type": "git",
+        "repo_url": url,
+        "ref": str(ref or "main").strip() or "main",
+        "subdir": str(subdir or "").strip(),
+    }
+
+
+def tarball_artifact(
+    url: str,
+    *,
+    strip_prefix: str = "",
+) -> dict[str, Any]:
+    source = str(url or "").strip()
+    if not source:
+        raise ValueError("tarball_artifact() requires a non-empty url")
+    return {
+        "type": "tarball",
+        "url": source,
+        "strip_prefix": str(strip_prefix or "").strip(),
+    }
+
+
+def command_adapter(
+    entrypoint: str,
+    *,
+    framework: str = "custom",
+    transport: str = "stdio",
+    args: Optional[list[str]] = None,
+    artifact: Optional[dict[str, Any]] = None,
+    env: Optional[dict[str, str]] = None,
+) -> dict[str, Any]:
+    command = str(entrypoint or "").strip()
+    if not command:
+        raise ValueError("command_adapter() requires a non-empty entrypoint")
+    out: dict[str, Any] = {
+        "type": "command",
+        "framework": str(framework or "custom").strip() or "custom",
+        "transport": str(transport or "stdio").strip() or "stdio",
+        "entrypoint": command,
+        "args": [str(arg).strip() for arg in (args or []) if str(arg).strip()],
+    }
+    if artifact and isinstance(artifact, dict):
+        out["artifact"] = dict(artifact)
+    if env and isinstance(env, dict):
+        out["env"] = {str(k).strip(): str(v) for k, v in env.items() if str(k).strip()}
+    return out
+
+
+def _framework_adapter(
+    framework: str,
+    entrypoint: str,
+    *,
+    transport: str = "stdio",
+    args: Optional[list[str]] = None,
+    artifact: Optional[dict[str, Any]] = None,
+    env: Optional[dict[str, str]] = None,
+) -> dict[str, Any]:
+    merged_env = {"AGENT_FRAMEWORK": framework}
+    if env:
+        merged_env.update({str(k): str(v) for k, v in env.items() if str(k).strip()})
+    return command_adapter(
+        entrypoint,
+        framework=framework,
+        transport=transport,
+        args=args,
+        artifact=artifact,
+        env=merged_env,
+    )
+
+
+def langgraph_adapter(
+    entrypoint: str = "python3 langgraph_worker.py",
+    *,
+    transport: str = "stdio",
+    args: Optional[list[str]] = None,
+    artifact: Optional[dict[str, Any]] = None,
+    env: Optional[dict[str, str]] = None,
+) -> dict[str, Any]:
+    return _framework_adapter(
+        "langgraph", entrypoint, transport=transport, args=args, artifact=artifact, env=env,
+    )
+
+
+def langchain_adapter(
+    entrypoint: str = "python3 langchain_worker.py",
+    *,
+    transport: str = "stdio",
+    args: Optional[list[str]] = None,
+    artifact: Optional[dict[str, Any]] = None,
+    env: Optional[dict[str, str]] = None,
+) -> dict[str, Any]:
+    return _framework_adapter(
+        "langchain", entrypoint, transport=transport, args=args, artifact=artifact, env=env,
+    )
+
+
+def agno_adapter(
+    entrypoint: str = "python3 agno_worker.py",
+    *,
+    transport: str = "stdio",
+    args: Optional[list[str]] = None,
+    artifact: Optional[dict[str, Any]] = None,
+    env: Optional[dict[str, str]] = None,
+) -> dict[str, Any]:
+    return _framework_adapter(
+        "agno", entrypoint, transport=transport, args=args, artifact=artifact, env=env,
+    )
+
+
+def event_envelope(
+    event_type: str,
+    *,
+    source: str = "api",
+    channel: str = "api",
+    message: str = "",
+    payload: Optional[dict[str, Any]] = None,
+    metadata: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    event_name = str(event_type or "").strip()
+    if not event_name:
+        raise ValueError("event_envelope() requires a non-empty event_type")
+    meta = dict(metadata or {})
+    run_id = str(meta.get("run_id") or "").strip() or _new_run_id()
+    meta["run_id"] = run_id
+    if not str(meta.get("idempotency_key") or "").strip():
+        meta["idempotency_key"] = f"{_slugify(event_name)}-{_slugify(run_id)}"
+    return {
+        "event": {
+            "type": event_name,
+            "source": str(source or "api").strip() or "api",
+            "channel": str(channel or "api").strip() or "api",
+            "message": str(message or ""),
+            "payload": dict(payload or {}),
+            "metadata": meta,
+        }
+    }
 
 
 def _normalize_trigger(
@@ -502,6 +895,13 @@ class _Http:
             body={"name": name, "requests_per_minute": int(requests_per_minute)},
         )
 
+    def upsert_secret(self, app_id: str, *, name: str, values: dict[str, str]) -> dict[str, Any]:
+        return self._request(
+            f"/apps/{app_id}/secrets",
+            method="POST",
+            body={"name": name, "values": values},
+        )
+
     def run_app(self, app_id: str, *, runtime_key: str, workflow_id: Optional[str], input_payload: dict[str, Any], warmup: bool = False):
         return self._request(
             f"/v1/apps/{app_id}/run",
@@ -596,6 +996,20 @@ class AraClient:
             return path.read_text(encoding="utf-8").strip()
         return ""
 
+    def _extract_secret_sync_plan(self, runtime_profile: dict[str, Any]) -> list[SecretDefinition]:
+        return _collect_runtime_secret_definitions(runtime_profile)
+
+    def _sync_secret_definitions(self, app_id: str, definitions: list[SecretDefinition]) -> dict[str, Any]:
+        synced: list[str] = []
+        referenced_only: list[str] = []
+        for definition in definitions:
+            if definition.values is None:
+                referenced_only.append(definition.name)
+                continue
+            self.http.upsert_secret(app_id, name=definition.name, values=definition.values)
+            synced.append(definition.name)
+        return {"synced": synced, "referenced_only": referenced_only}
+
     def deploy(
         self,
         *,
@@ -616,13 +1030,17 @@ class AraClient:
                 f"Project '{self.manifest.get('slug')}' already exists for this account (app_id={app_id})."
             )
 
+        runtime_profile = dict(self.manifest.get("runtime_profile") or {})
+        secret_definitions = self._extract_secret_sync_plan(runtime_profile)
+        runtime_profile.pop("__secret_definitions", None)
+
         payload = {
             "name": self.manifest.get("name"),
             "description": self.manifest.get("description") or "",
             "agent": self.manifest.get("agent") or {},
             "workflows": self.manifest.get("workflows") or [],
             "interfaces": self.manifest.get("interfaces") or {},
-            "runtime_profile": self.manifest.get("runtime_profile") or {},
+            "runtime_profile": runtime_profile,
         }
 
         if app_id:
@@ -637,6 +1055,8 @@ class AraClient:
             if activate:
                 self.http.update_app(app_id, {"status": "active"})
 
+        secret_sync = self._sync_secret_definitions(app_id, secret_definitions)
+
         key_out = self.http.create_key(
             app_id,
             name=(key_name or f"{self.manifest.get('slug')}-py-local"),
@@ -647,6 +1067,10 @@ class AraClient:
             raise RuntimeError("deploy failed: runtime key missing")
         key_path = self.cwd / ".runtime-key.local"
         key_path.write_text(runtime_key + "\n", encoding="utf-8")
+        try:
+            key_path.chmod(0o600)
+        except OSError:
+            pass
 
         warmup = None
         if warm:
@@ -664,6 +1088,7 @@ class AraClient:
             "runtime_key_written": True,
             "runtime_key_path": str(key_path),
             "warmup": warmup,
+            "secrets": secret_sync,
         }
 
     def run(self, *, workflow_id: Optional[str], input_payload: Optional[dict[str, Any]] = None, runtime_key: Optional[str] = None):
@@ -739,13 +1164,16 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
     parser = argparse.ArgumentParser(description="Ara Python SDK CLI")
     sub = parser.add_subparsers(dest="command")
 
-    p_deploy = sub.add_parser("deploy")
-    p_deploy.add_argument("--activate", default="true")
-    p_deploy.add_argument("--key-name", default="")
-    p_deploy.add_argument("--rpm", type=int, default=60)
-    p_deploy.add_argument("--warm", default="false")
-    p_deploy.add_argument("--warm-workflow", default="")
-    p_deploy.add_argument("--on-existing", choices=["update", "error"])
+    _deploy_parent = argparse.ArgumentParser(add_help=False)
+    _deploy_parent.add_argument("--activate", default="true")
+    _deploy_parent.add_argument("--key-name", default="")
+    _deploy_parent.add_argument("--rpm", type=int, default=60)
+    _deploy_parent.add_argument("--warm", default="false")
+    _deploy_parent.add_argument("--warm-workflow", default="")
+    _deploy_parent.add_argument("--on-existing", choices=["update", "error"])
+
+    sub.add_parser("deploy", parents=[_deploy_parent])
+    sub.add_parser("up", parents=[_deploy_parent])
 
     p_run = sub.add_parser("run")
     p_run.add_argument("--workflow", default="")
@@ -774,6 +1202,8 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
 
     args = parser.parse_args(argv)
     command = args.command or default_command
+    if command == "up":
+        command = "deploy"
     client = AraClient.from_env(manifest=manifest, cwd=os.getcwd())
 
     if command == "deploy":
@@ -786,7 +1216,17 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
         }
         if args.on_existing:
             deploy_kwargs["on_existing"] = args.on_existing
-        print(json.dumps(client.deploy(**deploy_kwargs), indent=2))
+        client.deploy(**deploy_kwargs)
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "slug": str(manifest.get("slug") or ""),
+                    "runtime_key_written": True,
+                },
+                indent=2,
+            )
+        )
         return
 
     if command == "run":
