@@ -1014,7 +1014,7 @@ class AraClient:
                     raise RuntimeError(
                         "Secret sync failed because this backend does not support "
                         "App SDK secret routes yet. Upgrade backend to a version "
-                        "with /apps/{app_id}/secrets support, or remove runtime(secrets=...) declarations."
+                        f"with /apps/{app_id}/secrets support, or remove runtime(secrets=...) declarations."
                     ) from exc
                 raise
             synced.append(definition.name)
