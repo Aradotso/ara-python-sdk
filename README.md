@@ -26,7 +26,7 @@ app = App(
         env={"APP_MODE": "production"},
         secrets=[
             Secret.from_name("provider-shared", required_keys=["OPENAI_API_KEY"]),
-            Secret.from_dict("provider-local", {"OPENAI_API_KEY": "sk-local"}),
+            Secret.from_local_environ("provider-local", env_keys=["OPENAI_API_KEY"]),
         ],
     ),
 )
@@ -45,6 +45,7 @@ if __name__ == "__main__":
 
 ```bash
 export ARA_ACCESS_TOKEN="your_user_jwt"
+export OPENAI_API_KEY="your_provider_key"
 
 python app.py deploy
 python app.py run --workflow booking-coordinator --message "Need 3 slots next week"
@@ -78,6 +79,18 @@ Deploy behavior:
 
 - Local secret sources sync to `/apps/{app_id}/secrets` before warmup.
 - Secret references remain in manifest; plaintext values are not embedded in app manifest payloads.
+
+## Adapter helper surface
+
+The SDK also exports optional helper utilities for adapter-style app runtimes:
+
+- `command_adapter(...)`
+- `langchain_adapter(...)`
+- `langgraph_adapter(...)`
+- `agno_adapter(...)`
+- `git_artifact(...)`
+- `tarball_artifact(...)`
+- `event_envelope(...)`
 
 ## Examples
 
