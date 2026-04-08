@@ -57,6 +57,8 @@ python app.py setup
 - `ARA_ACCESS_TOKEN`: user JWT for control plane
 - `ARA_API_BASE_URL`: optional API override (defaults to production API)
 - `ARA_RUNTIME_KEY`: optional runtime key override for `run/events`
+  - In the Ara app, open `Settings -> System`, then use **Auth Token -> Copy Access Token**.
+  - Paste that value into `ARA_ACCESS_TOKEN` before running SDK commands.
 
 ## Runtime env and secrets
 
