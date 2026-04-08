@@ -461,6 +461,28 @@ def command_adapter(
     return out
 
 
+def _framework_adapter(
+    framework: str,
+    entrypoint: str,
+    *,
+    transport: str = "stdio",
+    args: Optional[list[str]] = None,
+    artifact: Optional[dict[str, Any]] = None,
+    env: Optional[dict[str, str]] = None,
+) -> dict[str, Any]:
+    merged_env = {"AGENT_FRAMEWORK": framework}
+    if env:
+        merged_env.update({str(k): str(v) for k, v in env.items() if str(k).strip()})
+    return command_adapter(
+        entrypoint,
+        framework=framework,
+        transport=transport,
+        args=args,
+        artifact=artifact,
+        env=merged_env,
+    )
+
+
 def langgraph_adapter(
     entrypoint: str = "python3 langgraph_worker.py",
     *,
@@ -469,16 +491,8 @@ def langgraph_adapter(
     artifact: Optional[dict[str, Any]] = None,
     env: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
-    merged_env = {"AGENT_FRAMEWORK": "langgraph"}
-    if env:
-        merged_env.update({str(k): str(v) for k, v in env.items() if str(k).strip()})
-    return command_adapter(
-        entrypoint,
-        framework="langgraph",
-        transport=transport,
-        args=args,
-        artifact=artifact,
-        env=merged_env,
+    return _framework_adapter(
+        "langgraph", entrypoint, transport=transport, args=args, artifact=artifact, env=env,
     )
 
 
@@ -490,16 +504,8 @@ def langchain_adapter(
     artifact: Optional[dict[str, Any]] = None,
     env: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
-    merged_env = {"AGENT_FRAMEWORK": "langchain"}
-    if env:
-        merged_env.update({str(k): str(v) for k, v in env.items() if str(k).strip()})
-    return command_adapter(
-        entrypoint,
-        framework="langchain",
-        transport=transport,
-        args=args,
-        artifact=artifact,
-        env=merged_env,
+    return _framework_adapter(
+        "langchain", entrypoint, transport=transport, args=args, artifact=artifact, env=env,
     )
 
 
@@ -511,16 +517,8 @@ def agno_adapter(
     artifact: Optional[dict[str, Any]] = None,
     env: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
-    merged_env = {"AGENT_FRAMEWORK": "agno"}
-    if env:
-        merged_env.update({str(k): str(v) for k, v in env.items() if str(k).strip()})
-    return command_adapter(
-        entrypoint,
-        framework="agno",
-        transport=transport,
-        args=args,
-        artifact=artifact,
-        env=merged_env,
+    return _framework_adapter(
+        "agno", entrypoint, transport=transport, args=args, artifact=artifact, env=env,
     )
 
 
