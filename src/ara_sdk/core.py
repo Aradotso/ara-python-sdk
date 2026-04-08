@@ -1157,30 +1157,6 @@ def _parse_pairs(items: list[str]) -> dict[str, str]:
     return out
 
 
-def _deploy_cli_summary(result: dict[str, Any]) -> dict[str, Any]:
-    secrets = result.get("secrets")
-    synced: list[str] = []
-    referenced_only: list[str] = []
-    if isinstance(secrets, dict):
-        raw_synced = secrets.get("synced")
-        raw_referenced_only = secrets.get("referenced_only")
-        if isinstance(raw_synced, list):
-            synced = [str(item) for item in raw_synced]
-        if isinstance(raw_referenced_only, list):
-            referenced_only = [str(item) for item in raw_referenced_only]
-    return {
-        "app_id": str(result.get("app_id") or ""),
-        "slug": str(result.get("slug") or ""),
-        "runtime_key_written": bool(result.get("runtime_key_written")),
-        "runtime_key_path": str(result.get("runtime_key_path") or ""),
-        "warmup_triggered": result.get("warmup") is not None,
-        "secrets": {
-            "synced": synced,
-            "referenced_only": referenced_only,
-        },
-    }
-
-
 def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, default_command: str = "deploy") -> None:
     app_obj = app if isinstance(app, App) else None
     manifest = app_obj.manifest if app_obj is not None else dict(app)
@@ -1240,8 +1216,17 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
         }
         if args.on_existing:
             deploy_kwargs["on_existing"] = args.on_existing
-        deploy_result = client.deploy(**deploy_kwargs)
-        print(json.dumps(_deploy_cli_summary(deploy_result), indent=2))
+        client.deploy(**deploy_kwargs)
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "slug": str(manifest.get("slug") or ""),
+                    "runtime_key_written": True,
+                },
+                indent=2,
+            )
+        )
         return
 
     if command == "run":

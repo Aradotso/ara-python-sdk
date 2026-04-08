@@ -254,8 +254,9 @@ def test_cli_up_alias_dispatches_to_deploy(monkeypatch, capsys):
     assert stub.kwargs is not None
     assert stub.kwargs["warm"] is True
     cli_out = capsys.readouterr().out
+    assert '"ok": true' in cli_out.lower()
+    assert '"slug": "test-app"' in cli_out.lower()
     assert '"runtime_key_written": true' in cli_out.lower()
-    assert '"warmup_triggered": true' in cli_out.lower()
     assert "OPENAI_API_KEY" not in cli_out
     assert "sk-local" not in cli_out
 
