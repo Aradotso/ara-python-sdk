@@ -225,7 +225,18 @@ def test_cli_up_alias_dispatches_to_deploy(monkeypatch, capsys):
 
         def deploy(self, **kwargs):
             self.kwargs = kwargs
-            return {"ok": True}
+            return {
+                "app_id": "app_test_1",
+                "slug": "test-app",
+                "runtime_key_written": True,
+                "runtime_key_path": "/tmp/.runtime-key.local",
+                "warmup": {"runtime_key": "ak-secret"},
+                "secrets": {
+                    "synced": ["provider-local"],
+                    "referenced_only": ["provider-shared"],
+                    "values": {"OPENAI_API_KEY": "sk-local"},
+                },
+            }
 
     stub = _StubClient()
 
@@ -242,7 +253,11 @@ def test_cli_up_alias_dispatches_to_deploy(monkeypatch, capsys):
 
     assert stub.kwargs is not None
     assert stub.kwargs["warm"] is True
-    assert '"ok": true' in capsys.readouterr().out.lower()
+    cli_out = capsys.readouterr().out
+    assert '"runtime_key_written": true' in cli_out.lower()
+    assert '"warmup_triggered": true' in cli_out.lower()
+    assert "OPENAI_API_KEY" not in cli_out
+    assert "sk-local" not in cli_out
 
 
 def test_adapter_helpers_shapes():
