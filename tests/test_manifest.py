@@ -104,6 +104,21 @@ def test_runtime_includes_env_and_secret_refs():
     assert len(profile["__secret_definitions"]) == 2
 
 
+def test_runtime_duplicate_secret_name_keeps_first_definition():
+    profile = runtime(
+        secrets=[
+            Secret.from_name("provider-shared", required_keys=["OPENAI_API_KEY"]),
+            Secret.from_dict("provider-shared", {"OPENAI_API_KEY": "sk-overwrite-attempt"}),
+        ],
+    )
+    assert profile["secret_refs"] == [
+        {"name": "provider-shared", "required_keys": ["OPENAI_API_KEY"]},
+    ]
+    definitions = profile["__secret_definitions"]
+    assert len(definitions) == 1
+    assert definitions[0].values is None
+
+
 def test_secret_rejects_reserved_keys():
     with pytest.raises(ValueError):
         runtime(env={"SESSION_ID": "abc"})
@@ -216,6 +231,30 @@ def test_deploy_syncs_local_secrets_before_warmup(tmp_path):
         "referenced_only": ["provider-shared"],
     }
     assert (tmp_path / ".runtime-key.local").exists()
+
+
+def test_deploy_surfaces_backend_secrets_route_compat_error(tmp_path):
+    runtime_profile = runtime(
+        secrets=[Secret.from_dict("provider-local", {"OPENAI_API_KEY": "sk-local"})],
+    )
+    client = core.AraClient(
+        manifest=_manifest_with_runtime(runtime_profile),
+        api_base_url="https://api.ara.so",
+        access_token="token",
+        cwd=tmp_path,
+    )
+
+    class _CompatHttp(_FakeHttp):
+        def upsert_secret(self, app_id: str, *, name: str, values: dict[str, str]) -> dict:
+            _ = (app_id, name, values)
+            raise RuntimeError(
+                "POST /apps/app_test_1/secrets failed (404). "
+                "Response body hidden by default; set ARA_SDK_DEBUG_HTTP_ERRORS=true to include it."
+            )
+
+    client.http = _CompatHttp()
+    with pytest.raises(RuntimeError, match="does not support App SDK secret routes"):
+        client.deploy()
 
 
 def test_cli_up_alias_dispatches_to_deploy(monkeypatch, capsys):

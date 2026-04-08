@@ -1006,7 +1006,17 @@ class AraClient:
             if definition.values is None:
                 referenced_only.append(definition.name)
                 continue
-            self.http.upsert_secret(app_id, name=definition.name, values=definition.values)
+            try:
+                self.http.upsert_secret(app_id, name=definition.name, values=definition.values)
+            except RuntimeError as exc:
+                message = str(exc)
+                if f"/apps/{app_id}/secrets failed (404)" in message:
+                    raise RuntimeError(
+                        "Secret sync failed because this backend does not support "
+                        "App SDK secret routes yet. Upgrade backend to a version "
+                        f"with /apps/{app_id}/secrets support, or remove runtime(secrets=...) declarations."
+                    ) from exc
+                raise
             synced.append(definition.name)
         return {"synced": synced, "referenced_only": referenced_only}
 
