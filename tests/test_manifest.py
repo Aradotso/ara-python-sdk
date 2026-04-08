@@ -123,6 +123,14 @@ def test_secret_from_dotenv_and_local_environ(tmp_path, monkeypatch):
     assert env_secret.values == {"CAL_API_KEY": "cal-123"}
 
 
+def test_secret_name_requires_two_or_more_characters():
+    with pytest.raises(ValueError, match="Secret name must match"):
+        Secret.from_name("a")
+
+    secret = Secret.from_name("ab")
+    assert secret.name == "ab"
+
+
 class _FakeHttp:
     def __init__(self):
         self.calls: list[str] = []
