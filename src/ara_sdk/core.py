@@ -18,6 +18,7 @@ DEFAULT_TIMEOUT_SECONDS = 120
 DEFAULT_MAX_RETRIES = 2
 DEFAULT_RETRY_BACKOFF_SECONDS = 5
 DEBUG_HTTP_ERRORS_ENV = "ARA_SDK_DEBUG_HTTP_ERRORS"
+DEFAULT_API_BASE_URL = "https://ara-api-prd.up.railway.app"
 
 
 def _slugify(value: str) -> str:
@@ -565,10 +566,12 @@ class AraClient:
     def from_env(cls, *, manifest: dict[str, Any], cwd: Optional[str] = None) -> "AraClient":
         base = pathlib.Path(cwd or os.getcwd())
         _read_dotenv(base / ".env")
-        env = _require_env("ARA_API_BASE_URL", "ARA_ACCESS_TOKEN")
+        if not os.getenv("ARA_API_BASE_URL", "").strip():
+            os.environ["ARA_API_BASE_URL"] = DEFAULT_API_BASE_URL
+        env = _require_env("ARA_ACCESS_TOKEN")
         return cls(
             manifest=manifest,
-            api_base_url=env["ARA_API_BASE_URL"],
+            api_base_url=os.getenv("ARA_API_BASE_URL", DEFAULT_API_BASE_URL).strip() or DEFAULT_API_BASE_URL,
             access_token=env["ARA_ACCESS_TOKEN"],
             cwd=base,
         )

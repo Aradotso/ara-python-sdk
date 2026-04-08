@@ -34,7 +34,6 @@ if __name__ == "__main__":
 ```
 
 ```bash
-export ARA_API_BASE_URL="https://api.ara.so"
 export ARA_ACCESS_TOKEN="your_user_jwt"
 
 python app.py deploy
@@ -45,9 +44,7 @@ python app.py setup
 
 ## Environment
 
-- `ARA_API_BASE_URL`: Ara API base URL
 - `ARA_ACCESS_TOKEN`: user JWT for control plane
-- `ARA_RUNTIME_KEY`: optional runtime key override for run/events (otherwise `.runtime-key.local` is used)
 
 ## Examples
 

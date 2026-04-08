@@ -15,7 +15,6 @@ It is intentionally outside the core package so the SDK stays provider-agnostic.
 
 - `CALCOM_API_KEY`
 - `CALCOM_EVENT_TYPE_ID` or `CALCOM_EVENT_TYPE_SLUG`
-- `ARA_API_BASE_URL`
 - `ARA_ACCESS_TOKEN`
 
 ## Security
