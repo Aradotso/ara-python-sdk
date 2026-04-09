@@ -37,6 +37,54 @@ def test_subagent_registers_profile_and_workflow():
     assert subagents[0]["sandbox"]["max_concurrency"] == 3
 
 
+def test_sandbox_allows_multisandbox_spawn_shape():
+    cfg = sandbox(
+        policy="dedicated",
+        key="planner",
+        allow_spawn=True,
+        spawn_to=["researcher", "verifier"],
+        max_spawn_depth=3,
+        max_children_per_parent=4,
+        max_total_child_sessions_per_run=9,
+        ephemeral_ttl_minutes=5,
+        child_policy="ephemeral",
+        child_runtime=runtime(memory_mb=1024),
+    )
+    assert cfg["policy"] == "dedicated"
+    assert cfg["key"] == "planner"
+    assert cfg["spawn"]["allow"] is True
+    assert cfg["spawn"]["to"] == ["researcher", "verifier"]
+    assert cfg["spawn"]["max_depth"] == 3
+    assert cfg["spawn"]["max_children_per_parent"] == 4
+    assert cfg["spawn"]["max_total_child_sessions_per_run"] == 9
+    assert cfg["spawn"]["ephemeral_ttl_minutes"] == 5
+    assert cfg["spawn"]["child_policy"] == "ephemeral"
+    assert cfg["spawn"]["child_runtime"]["memory_mb"] == 1024
+
+
+def test_sandbox_rejects_unknown_policy():
+    with pytest.raises(ValueError, match="sandbox\\(policy=\\.\\.\\.\\) must be one of"):
+        sandbox(policy="invalid-policy")
+
+
+def test_sandbox_rejects_spawn_limit_exceeded():
+    with pytest.raises(ValueError, match="max_spawn_depth"):
+        sandbox(
+            policy="dedicated",
+            allow_spawn=True,
+            max_spawn_depth=99,
+        )
+
+
+def test_sandbox_rejects_non_list_spawn_to():
+    with pytest.raises(ValueError, match="expects a list\\[str\\]"):
+        sandbox(
+            policy="dedicated",
+            allow_spawn=True,
+            spawn_to="researcher",  # type: ignore[arg-type]
+        )
+
+
 def test_http_error_redacts_response_body_by_default(monkeypatch):
     leaked = "internal stack trace: host=prod-worker-17"
 
@@ -52,7 +100,7 @@ def test_http_error_redacts_response_body_by_default(monkeypatch):
     monkeypatch.delenv("ARA_SDK_DEBUG_HTTP_ERRORS", raising=False)
     monkeypatch.setattr(core.urllib.request, "urlopen", _raise_http_error)
 
-    http = core._Http(base_url="https://api.ara.so", access_token="test-token")
+    http = core._Http(base_url="https://api.ara.so", api_key="test-token")
     with pytest.raises(RuntimeError) as exc:
         http.list_apps()
 
@@ -77,7 +125,7 @@ def test_http_error_includes_response_body_in_debug_mode(monkeypatch):
     monkeypatch.setenv("ARA_SDK_DEBUG_HTTP_ERRORS", "true")
     monkeypatch.setattr(core.urllib.request, "urlopen", _raise_http_error)
 
-    http = core._Http(base_url="https://api.ara.so", access_token="test-token")
+    http = core._Http(base_url="https://api.ara.so", api_key="test-token")
     with pytest.raises(RuntimeError) as exc:
         http.list_apps()
 
@@ -102,6 +150,24 @@ def test_runtime_includes_env_and_secret_refs():
     ]
     assert "__secret_definitions" in profile
     assert len(profile["__secret_definitions"]) == 2
+
+
+def test_from_env_prefers_api_key_over_legacy_access_token(monkeypatch, tmp_path):
+    monkeypatch.setenv("ARA_API_BASE_URL", "https://api.ara.so")
+    monkeypatch.setenv("ARA_API_KEY", "ara_api_key_primary_0123456789abcdef")
+    monkeypatch.setenv("ARA_ACCESS_TOKEN", "legacy-token")
+
+    client = core.AraClient.from_env(manifest=_manifest_with_runtime(runtime_profile={}), cwd=str(tmp_path))
+    assert client.http.api_key == "ara_api_key_primary_0123456789abcdef"
+
+
+def test_from_env_accepts_legacy_access_token_fallback(monkeypatch, tmp_path):
+    monkeypatch.setenv("ARA_API_BASE_URL", "https://api.ara.so")
+    monkeypatch.delenv("ARA_API_KEY", raising=False)
+    monkeypatch.setenv("ARA_ACCESS_TOKEN", "legacy-token")
+
+    client = core.AraClient.from_env(manifest=_manifest_with_runtime(runtime_profile={}), cwd=str(tmp_path))
+    assert client.http.api_key == "legacy-token"
 
 
 def test_runtime_duplicate_secret_name_keeps_first_definition():
@@ -211,7 +277,7 @@ def test_deploy_syncs_local_secrets_before_warmup(tmp_path):
     client = core.AraClient(
         manifest=_manifest_with_runtime(runtime_profile),
         api_base_url="https://api.ara.so",
-        access_token="token",
+        api_key="token",
         cwd=tmp_path,
     )
     fake_http = _FakeHttp()
@@ -240,7 +306,7 @@ def test_deploy_surfaces_backend_secrets_route_compat_error(tmp_path):
     client = core.AraClient(
         manifest=_manifest_with_runtime(runtime_profile),
         api_base_url="https://api.ara.so",
-        access_token="token",
+        api_key="token",
         cwd=tmp_path,
     )
 

@@ -20,6 +20,15 @@ DEFAULT_MAX_RETRIES = 2
 DEFAULT_RETRY_BACKOFF_SECONDS = 5
 DEBUG_HTTP_ERRORS_ENV = "ARA_SDK_DEBUG_HTTP_ERRORS"
 DEFAULT_API_BASE_URL = "https://ara-api-prd.up.railway.app"
+ALLOWED_SANDBOX_POLICIES = frozenset({"shared", "dedicated", "ephemeral", "inherited"})
+MAGIC_NUMBER_SPAWN_DEFAULT_MAX_RECURSIVE_DEPTH = 1
+MAGIC_NUMBER_SPAWN_HARD_MAX_RECURSIVE_DEPTH = 3
+MAGIC_NUMBER_SPAWN_DEFAULT_MAX_CHILDREN_PER_PARENT = 3
+MAGIC_NUMBER_SPAWN_HARD_MAX_CHILDREN_PER_PARENT = 8
+MAGIC_NUMBER_SPAWN_DEFAULT_MAX_TOTAL_CHILD_SESSIONS_PER_RUN = 12
+MAGIC_NUMBER_SPAWN_HARD_MAX_TOTAL_CHILD_SESSIONS_PER_RUN = 12
+MAGIC_NUMBER_SPAWN_DEFAULT_EPHEMERAL_TTL_MINUTES = 5
+MAGIC_NUMBER_SPAWN_HARD_MAX_EPHEMERAL_TTL_MINUTES = 30
 ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 SECRET_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}[a-z0-9]$")
 RESERVED_ENV_KEYS = frozenset({"SESSION_ID", "USER_ID", "APP_ID"})
@@ -364,14 +373,93 @@ def sandbox(
     policy: str = "shared",
     max_concurrency: Optional[int] = None,
     idle_ttl_minutes: Optional[int] = None,
+    key: Optional[str] = None,
+    allow_spawn: Optional[bool] = None,
+    spawn_to: Optional[list[str]] = None,
+    max_spawn_depth: Optional[int] = None,
+    max_children_per_parent: Optional[int] = None,
+    max_total_child_sessions_per_run: Optional[int] = None,
+    ephemeral_ttl_minutes: Optional[int] = None,
+    child_policy: Optional[str] = None,
+    child_runtime: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     normalized_policy = str(policy or "shared").strip().lower()
-    if normalized_policy != "shared":
-        raise ValueError("Public SDK currently supports only sandbox(policy='shared').")
-    out: dict[str, Any] = {"policy": "shared"}
+    if normalized_policy not in ALLOWED_SANDBOX_POLICIES:
+        allowed = ", ".join(sorted(ALLOWED_SANDBOX_POLICIES))
+        raise ValueError(f"sandbox(policy=...) must be one of: {allowed}")
+    out: dict[str, Any] = {"policy": normalized_policy}
+    key_value = str(key or "").strip()
+    if key_value:
+        out["key"] = key_value
     out["max_concurrency"] = max(1, int(max_concurrency or DEFAULT_SUBAGENT_MAX_CONCURRENCY))
     if idle_ttl_minutes is not None:
         out["idle_ttl_minutes"] = max(1, int(idle_ttl_minutes))
+    if child_policy is not None:
+        normalized_child_policy = str(child_policy or "").strip().lower()
+        if normalized_child_policy not in ALLOWED_SANDBOX_POLICIES:
+            allowed = ", ".join(sorted(ALLOWED_SANDBOX_POLICIES))
+            raise ValueError(f"sandbox(child_policy=...) must be one of: {allowed}")
+    if max_spawn_depth is not None:
+        max_spawn_depth = max(0, int(max_spawn_depth))
+    if spawn_to is not None and not isinstance(spawn_to, list):
+        raise ValueError("sandbox(spawn_to=...) expects a list[str]")
+    targets = [str(target).strip() for target in (spawn_to or []) if str(target).strip()]
+    if allow_spawn is False:
+        spawn_enabled = False
+    else:
+        spawn_enabled = bool(allow_spawn) or bool(targets)
+    if spawn_enabled:
+        spawn_cfg: dict[str, Any] = {"allow": True, "to": targets}
+        if max_spawn_depth is None:
+            depth = MAGIC_NUMBER_SPAWN_DEFAULT_MAX_RECURSIVE_DEPTH
+        else:
+            depth = max(0, int(max_spawn_depth))
+        if depth > MAGIC_NUMBER_SPAWN_HARD_MAX_RECURSIVE_DEPTH:
+            raise ValueError(
+                "sandbox(max_spawn_depth=...) exceeds hard limit "
+                f"{MAGIC_NUMBER_SPAWN_HARD_MAX_RECURSIVE_DEPTH}"
+            )
+        spawn_cfg["max_depth"] = depth
+        child_limit = max(
+            1,
+            int(max_children_per_parent or MAGIC_NUMBER_SPAWN_DEFAULT_MAX_CHILDREN_PER_PARENT),
+        )
+        if child_limit > MAGIC_NUMBER_SPAWN_HARD_MAX_CHILDREN_PER_PARENT:
+            raise ValueError(
+                "sandbox(max_children_per_parent=...) exceeds hard limit "
+                f"{MAGIC_NUMBER_SPAWN_HARD_MAX_CHILDREN_PER_PARENT}"
+            )
+        spawn_cfg["max_children_per_parent"] = child_limit
+        total_limit = max(
+            1,
+            int(
+                max_total_child_sessions_per_run
+                or MAGIC_NUMBER_SPAWN_DEFAULT_MAX_TOTAL_CHILD_SESSIONS_PER_RUN
+            ),
+        )
+        if total_limit > MAGIC_NUMBER_SPAWN_HARD_MAX_TOTAL_CHILD_SESSIONS_PER_RUN:
+            raise ValueError(
+                "sandbox(max_total_child_sessions_per_run=...) exceeds hard limit "
+                f"{MAGIC_NUMBER_SPAWN_HARD_MAX_TOTAL_CHILD_SESSIONS_PER_RUN}"
+            )
+        spawn_cfg["max_total_child_sessions_per_run"] = total_limit
+        ttl_minutes = max(
+            1,
+            int(ephemeral_ttl_minutes or MAGIC_NUMBER_SPAWN_DEFAULT_EPHEMERAL_TTL_MINUTES),
+        )
+        if ttl_minutes > MAGIC_NUMBER_SPAWN_HARD_MAX_EPHEMERAL_TTL_MINUTES:
+            raise ValueError(
+                "sandbox(ephemeral_ttl_minutes=...) exceeds hard limit "
+                f"{MAGIC_NUMBER_SPAWN_HARD_MAX_EPHEMERAL_TTL_MINUTES}"
+            )
+        spawn_cfg["ephemeral_ttl_minutes"] = ttl_minutes
+        if child_policy is not None:
+            spawn_cfg["child_policy"] = normalized_child_policy
+        if child_runtime is not None:
+            cr = dict(child_runtime)
+            cr.pop("__secret_definitions", None)
+            spawn_cfg["child_runtime"] = cr
+        out["spawn"] = spawn_cfg
     return out
 
 
@@ -824,27 +912,10 @@ def _read_dotenv(path: pathlib.Path) -> None:
             os.environ[key] = value
 
 
-def _require_env(*keys: str) -> dict[str, str]:
-    out: dict[str, str] = {}
-    missing: list[str] = []
-    for key in keys:
-        value = os.getenv(key, "").strip()
-        if not value:
-            missing.append(key)
-        else:
-            out[key] = value
-    if missing:
-        raise RuntimeError(
-            "Missing required env vars: " + ", ".join(missing) + ". "
-            "Create .env or export variables before running this command."
-        )
-    return out
-
-
 class _Http:
-    def __init__(self, base_url: str, access_token: str):
+    def __init__(self, base_url: str, api_key: str):
         self.base_url = base_url.rstrip("/")
-        self.access_token = access_token
+        self.api_key = api_key
 
     def _request(
         self,
@@ -859,7 +930,7 @@ class _Http:
         payload = None if body is None else json.dumps(body).encode("utf-8")
         req_headers = {
             "Content-Type": "application/json",
-            "Authorization": auth_header or f"Bearer {self.access_token}",
+            "Authorization": auth_header or f"Bearer {self.api_key}",
         }
         if headers:
             req_headers.update(headers)
@@ -957,10 +1028,10 @@ class _Http:
 class AraClient:
     """Runtime client bound to one App manifest."""
 
-    def __init__(self, *, manifest: dict[str, Any], api_base_url: str, access_token: str, cwd: pathlib.Path):
+    def __init__(self, *, manifest: dict[str, Any], api_base_url: str, api_key: str, cwd: pathlib.Path):
         self.manifest = dict(manifest)
         self.cwd = cwd
-        self.http = _Http(api_base_url, access_token)
+        self.http = _Http(api_base_url, api_key)
 
     @classmethod
     def from_env(cls, *, manifest: dict[str, Any], cwd: Optional[str] = None) -> "AraClient":
@@ -968,11 +1039,17 @@ class AraClient:
         _read_dotenv(base / ".env")
         if not os.getenv("ARA_API_BASE_URL", "").strip():
             os.environ["ARA_API_BASE_URL"] = DEFAULT_API_BASE_URL
-        env = _require_env("ARA_ACCESS_TOKEN")
+        # Prefer long-lived SDK API key; keep legacy access token as fallback.
+        api_key = os.getenv("ARA_API_KEY", "").strip() or os.getenv("ARA_ACCESS_TOKEN", "").strip()
+        if not api_key:
+            raise RuntimeError(
+                "Missing required env var: ARA_API_KEY. "
+                "Legacy ARA_ACCESS_TOKEN is still accepted as a fallback."
+            )
         return cls(
             manifest=manifest,
             api_base_url=os.getenv("ARA_API_BASE_URL", DEFAULT_API_BASE_URL).strip() or DEFAULT_API_BASE_URL,
-            access_token=env["ARA_ACCESS_TOKEN"],
+            api_key=api_key,
             cwd=base,
         )
 
