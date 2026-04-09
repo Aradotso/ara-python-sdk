@@ -1,6 +1,6 @@
 # Ara Python SDK
 
-Public Python SDK for building Ara apps with a decorator-first workflow.
+Public Python SDK for building Ara apps with a decorator-first workflow style.
 
 ## Install
 
