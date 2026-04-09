@@ -13,6 +13,7 @@ pip install ara-sdk
 - Public SDK is generic and provider-agnostic.
 - Runtime policy, retries, and safety controls are enforced server-side.
 - Optional integrations (Cal.com, CRM, etc.) live in examples, not in the core SDK package.
+- Public mirror sync keeps upstream Ara commit message context with source attribution trailers.
 
 ## Quickstart
 
