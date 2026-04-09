@@ -58,7 +58,9 @@ export ARA_API_KEY="your_long_lived_api_key"
 export OPENAI_API_KEY="your_provider_key"
 
 python app.py deploy
+python app.py setup-auth
 python app.py run --workflow booking-coordinator --message "Need 3 slots next week"
+python app.py run-async --workflow booking-coordinator --message "Need 3 slots next week" --response-mode poll
 python app.py events --event-type channel.web.inbound --channel web --message "hello"
 python app.py setup
 ```
@@ -66,11 +68,22 @@ python app.py setup
 ## Environment
 
 - `ARA_API_KEY`: long-lived user API key for control plane
-- `ARA_API_BASE_URL`: optional API override (defaults to production API)
-- `ARA_RUNTIME_KEY`: optional runtime key override for `run/events`
   - In the Ara app, open `Settings -> System`, then use **API Key -> Copy API Key**.
   - Paste that value into `ARA_API_KEY` before running SDK commands.
   - Legacy `ARA_ACCESS_TOKEN` is still accepted as a compatibility fallback.
+- `ARA_API_BASE_URL`: optional API override (defaults to production API)
+- `ARA_RUNTIME_KEY`: optional runtime key override for `run/events`
+- `ARA_APP_HEADER_KEY`: optional app header key override (`X-Ara-App-Key`) for `run/events/run-async/run-status`
+  - Prefer running `python app.py setup-auth` to mint/store an app header key in `.app-header-key.local`.
+  - Set `ARA_APP_HEADER_KEY` only when overriding that generated key.
+
+Local bootstrap helpers:
+
+- `python app.py setup-auth`:
+  - resolves `app_id` by app slug
+  - ensures `.runtime-key.local` exists (optional)
+  - creates `/apps/{app_id}/x-keys` key when missing
+  - writes `.app-header-key.local` for subsequent CLI calls
 
 ## Runtime env and secrets
 

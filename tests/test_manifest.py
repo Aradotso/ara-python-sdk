@@ -282,18 +282,74 @@ class _FakeHttp:
         self.calls.append("create_key")
         return {"key": "ak_app_test"}
 
+    def list_x_keys(self, app_id: str) -> dict:
+        _ = app_id
+        self.calls.append("list_x_keys")
+        return {"keys": []}
+
+    def create_x_key(self, app_id: str, *, name: str, requests_per_minute: int) -> dict:
+        _ = (app_id, name, requests_per_minute)
+        self.calls.append("create_x_key")
+        return {"id": "apk_x_test_1", "key": "aik_app_test", "key_prefix": "aik_app_test"}
+
+    def revoke_x_key(self, app_id: str, key_id: str) -> None:
+        _ = (app_id, key_id)
+        self.calls.append("revoke_x_key")
+
     def run_app(
         self,
         app_id: str,
         *,
-        runtime_key: str,
+        runtime_key: str | None = None,
+        app_header_key: str | None = None,
         workflow_id: str | None,
         input_payload: dict,
         warmup: bool = False,
     ) -> dict:
-        _ = (app_id, runtime_key, workflow_id, input_payload, warmup)
+        _ = (app_id, runtime_key, app_header_key, workflow_id, input_payload, warmup)
         self.calls.append("run_app")
         return {"ok": True}
+
+    def submit_async_run(
+        self,
+        app_id: str,
+        *,
+        runtime_key: str | None = None,
+        app_header_key: str | None = None,
+        workflow_id: str | None,
+        input_payload: dict,
+        warmup: bool = False,
+        run_id: str | None = None,
+        idempotency_key: str | None = None,
+        response_mode: str = "poll",
+        callback: dict | None = None,
+    ) -> dict:
+        _ = (
+            app_id,
+            runtime_key,
+            app_header_key,
+            workflow_id,
+            input_payload,
+            warmup,
+            run_id,
+            idempotency_key,
+            response_mode,
+            callback,
+        )
+        self.calls.append("submit_async_run")
+        return {"ok": True, "run": {"run_id": run_id or "run_test_1", "status": "running"}}
+
+    def get_async_run_status(
+        self,
+        app_id: str,
+        run_id: str,
+        *,
+        runtime_key: str | None = None,
+        app_header_key: str | None = None,
+    ) -> dict:
+        _ = (app_id, run_id, runtime_key, app_header_key)
+        self.calls.append("get_async_run_status")
+        return {"ok": True, "run": {"run_id": run_id, "status": "completed"}}
 
 
 def _manifest_with_runtime(runtime_profile: dict) -> dict:
@@ -388,6 +444,62 @@ def test_deploy_defaults_to_update_when_app_exists(tmp_path):
     assert "update_app" in fake_http.calls
 
 
+def test_setup_auth_creates_and_persists_app_header_key(tmp_path):
+    client = core.AraClient(
+        manifest=_manifest_with_runtime(runtime_profile={}),
+        api_base_url="https://api.ara.so",
+        api_key="token",
+        cwd=tmp_path,
+    )
+
+    class _ExistingHttp(_FakeHttp):
+        def list_apps(self) -> dict:
+            self.calls.append("list_apps")
+            return {"apps": [{"id": "app_existing_1", "slug": "test-app", "role": "owner"}]}
+
+    fake_http = _ExistingHttp()
+    client.http = fake_http
+
+    out = client.setup_auth()
+
+    assert out["app_id"] == "app_existing_1"
+    assert out["app_header_key_present"] is True
+    assert out["app_header_key_created"] is True
+    assert (tmp_path / ".app-header-key.local").exists()
+    assert "create_x_key" in fake_http.calls
+
+
+def test_run_async_and_status_support_header_key(tmp_path):
+    client = core.AraClient(
+        manifest=_manifest_with_runtime(runtime_profile={}),
+        api_base_url="https://api.ara.so",
+        api_key="token",
+        cwd=tmp_path,
+    )
+
+    class _ExistingHttp(_FakeHttp):
+        def list_apps(self) -> dict:
+            self.calls.append("list_apps")
+            return {"apps": [{"id": "app_existing_1", "slug": "test-app", "role": "owner"}]}
+
+    fake_http = _ExistingHttp()
+    client.http = fake_http
+
+    submit = client.run_async(
+        workflow_id="booking-coordinator",
+        input_payload={"message": "hello"},
+        app_header_key="aik_app_inline_key",
+        run_id="run_inline_1",
+        idempotency_key="run-inline-1",
+    )
+    status = client.run_status(run_id="run_inline_1", app_header_key="aik_app_inline_key")
+
+    assert submit["ok"] is True
+    assert status["ok"] is True
+    assert "submit_async_run" in fake_http.calls
+    assert "get_async_run_status" in fake_http.calls
+
+
 def test_cli_up_alias_dispatches_to_deploy(monkeypatch, capsys):
     class _StubClient:
         def __init__(self):
@@ -430,6 +542,29 @@ def test_cli_up_alias_dispatches_to_deploy(monkeypatch, capsys):
     assert '"runtime_key_written": true' in cli_out.lower()
     assert "OPENAI_API_KEY" not in cli_out
     assert "sk-local" not in cli_out
+
+
+def test_cli_setup_auth_dispatches_to_client(monkeypatch, capsys):
+    class _StubClient:
+        def setup_auth(self, **kwargs):
+            assert kwargs["x_key_name"] == "demo-x"
+            assert kwargs["x_key_rpm"] == 55
+            assert kwargs["ensure_runtime_key"] is True
+            return {"ok": True, "app_id": "app_test_1", "app_header_key_present": True}
+
+    stub = _StubClient()
+    monkeypatch.setattr(
+        core.AraClient,
+        "from_env",
+        classmethod(lambda cls, *, manifest, cwd=None: stub),
+    )
+    core.run_cli(
+        _manifest_with_runtime(runtime_profile={}),
+        argv=["setup-auth", "--x-key-name", "demo-x", "--x-key-rpm", "55", "--ensure-runtime-key", "true"],
+    )
+    out = capsys.readouterr().out
+    assert '"ok": true' in out.lower()
+    assert '"app_id": "app_test_1"' in out
 
 
 def test_adapter_helpers_shapes():

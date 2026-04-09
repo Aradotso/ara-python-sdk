@@ -1060,10 +1060,14 @@ class _Http:
     ) -> Any:
         url = f"{self.base_url}{path}"
         payload = None if body is None else json.dumps(body).encode("utf-8")
-        req_headers = {
+        req_headers: dict[str, str] = {
             "Content-Type": "application/json",
-            "Authorization": auth_header or f"Bearer {self.api_key}",
         }
+        if auth_header is not None:
+            if auth_header:
+                req_headers["Authorization"] = auth_header
+        elif self.api_key:
+            req_headers["Authorization"] = f"Bearer {self.api_key}"
         if headers:
             req_headers.update(headers)
         req = urllib.request.Request(url, method=method, data=payload, headers=req_headers)
@@ -1098,6 +1102,22 @@ class _Http:
             body={"name": name, "requests_per_minute": int(requests_per_minute)},
         )
 
+    def list_x_keys(self, app_id: str) -> dict[str, Any]:
+        return self._request(f"/apps/{app_id}/x-keys")
+
+    def create_x_key(self, app_id: str, *, name: str, requests_per_minute: int) -> dict[str, Any]:
+        return self._request(
+            f"/apps/{app_id}/x-keys",
+            method="POST",
+            body={"name": name, "requests_per_minute": int(requests_per_minute)},
+        )
+
+    def revoke_x_key(self, app_id: str, key_id: str) -> None:
+        _ = self._request(
+            f"/apps/{app_id}/x-keys/{key_id}",
+            method="DELETE",
+        )
+
     def upsert_secret(self, app_id: str, *, name: str, values: dict[str, str]) -> dict[str, Any]:
         return self._request(
             f"/apps/{app_id}/secrets",
@@ -1105,19 +1125,39 @@ class _Http:
             body={"name": name, "values": values},
         )
 
-    def run_app(self, app_id: str, *, runtime_key: str, workflow_id: Optional[str], input_payload: dict[str, Any], warmup: bool = False):
+    def run_app(
+        self,
+        app_id: str,
+        *,
+        runtime_key: Optional[str] = None,
+        app_header_key: Optional[str] = None,
+        workflow_id: Optional[str],
+        input_payload: dict[str, Any],
+        warmup: bool = False,
+    ):
+        headers: dict[str, str] = {}
+        auth_header: Optional[str] = None
+        if app_header_key:
+            headers["X-Ara-App-Key"] = app_header_key
+            auth_header = ""
+        elif runtime_key:
+            auth_header = f"Bearer {runtime_key}"
+        else:
+            raise RuntimeError("run_app requires runtime_key or app_header_key")
         return self._request(
             f"/v1/apps/{app_id}/run",
             method="POST",
+            headers=headers,
             body={"workflow_id": workflow_id, "warmup": bool(warmup), "input": input_payload},
-            auth_header=f"Bearer {runtime_key}",
+            auth_header=auth_header,
         )
 
     def send_event(
         self,
         app_id: str,
         *,
-        runtime_key: str,
+        runtime_key: Optional[str] = None,
+        app_header_key: Optional[str] = None,
         workflow_id: Optional[str],
         event_type: str,
         channel: str,
@@ -1130,6 +1170,14 @@ class _Http:
         headers: dict[str, str] = {}
         if idempotency_key:
             headers["X-Idempotency-Key"] = idempotency_key
+        auth_header: Optional[str] = None
+        if app_header_key:
+            headers["X-Ara-App-Key"] = app_header_key
+            auth_header = ""
+        elif runtime_key:
+            auth_header = f"Bearer {runtime_key}"
+        else:
+            raise RuntimeError("send_event requires runtime_key or app_header_key")
         return self._request(
             f"/v1/apps/{app_id}/events",
             method="POST",
@@ -1143,7 +1191,74 @@ class _Http:
                 "payload": payload,
                 "metadata": metadata,
             },
-            auth_header=f"Bearer {runtime_key}",
+            auth_header=auth_header,
+        )
+
+    def submit_async_run(
+        self,
+        app_id: str,
+        *,
+        runtime_key: Optional[str] = None,
+        app_header_key: Optional[str] = None,
+        workflow_id: Optional[str],
+        input_payload: dict[str, Any],
+        warmup: bool = False,
+        run_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        response_mode: str = "poll",
+        callback: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        headers: dict[str, str] = {}
+        auth_header: Optional[str] = None
+        if app_header_key:
+            headers["X-Ara-App-Key"] = app_header_key
+            auth_header = ""
+        elif runtime_key:
+            auth_header = f"Bearer {runtime_key}"
+        else:
+            raise RuntimeError("submit_async_run requires runtime_key or app_header_key")
+        body: dict[str, Any] = {
+            "workflow_id": workflow_id,
+            "warmup": bool(warmup),
+            "input": input_payload,
+            "response_mode": response_mode,
+        }
+        if run_id:
+            body["run_id"] = run_id
+        if idempotency_key:
+            body["idempotency_key"] = idempotency_key
+        if callback:
+            body["callback"] = callback
+        return self._request(
+            f"/v1/apps/{app_id}/runs",
+            method="POST",
+            headers=headers,
+            body=body,
+            auth_header=auth_header,
+        )
+
+    def get_async_run_status(
+        self,
+        app_id: str,
+        run_id: str,
+        *,
+        runtime_key: Optional[str] = None,
+        app_header_key: Optional[str] = None,
+    ) -> dict[str, Any]:
+        headers: dict[str, str] = {}
+        auth_header: Optional[str] = None
+        if app_header_key:
+            headers["X-Ara-App-Key"] = app_header_key
+            auth_header = ""
+        elif runtime_key:
+            auth_header = f"Bearer {runtime_key}"
+        else:
+            raise RuntimeError("get_async_run_status requires runtime_key or app_header_key")
+        return self._request(
+            f"/v1/apps/{app_id}/runs/{run_id}",
+            method="GET",
+            headers=headers,
+            auth_header=auth_header,
         )
 
     def setup(self, app_id: str) -> dict[str, Any]:
@@ -1203,6 +1318,25 @@ class AraClient:
         path = self.cwd / ".runtime-key.local"
         if path.exists():
             return path.read_text(encoding="utf-8").strip()
+        return ""
+
+    def _app_header_key_path(self) -> pathlib.Path:
+        return self.cwd / ".app-header-key.local"
+
+    def _resolve_app_header_key(self, explicit: Optional[str] = None) -> str:
+        if explicit:
+            return explicit
+        env_key = os.getenv("ARA_APP_HEADER_KEY", "").strip()
+        if env_key:
+            return env_key
+        path = self._app_header_key_path()
+        if path.exists():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                return ""
+            if isinstance(payload, dict):
+                return str(payload.get("key") or "").strip()
         return ""
 
     def _extract_secret_sync_plan(self, runtime_profile: dict[str, Any]) -> list[SecretDefinition]:
@@ -1312,14 +1446,28 @@ class AraClient:
             "secrets": secret_sync,
         }
 
-    def run(self, *, workflow_id: Optional[str], input_payload: Optional[dict[str, Any]] = None, runtime_key: Optional[str] = None):
+    def run(
+        self,
+        *,
+        workflow_id: Optional[str],
+        input_payload: Optional[dict[str, Any]] = None,
+        runtime_key: Optional[str] = None,
+        app_header_key: Optional[str] = None,
+    ):
         app = self._find_app_by_slug()
         if not app:
             raise RuntimeError(f"App '{self.manifest.get('slug')}' not found. Deploy first.")
-        key = self._resolve_runtime_key(runtime_key)
-        if not key:
-            raise RuntimeError("Missing runtime key. Set ARA_RUNTIME_KEY or run deploy first.")
-        return self.http.run_app(str(app["id"]), runtime_key=key, workflow_id=workflow_id, input_payload=input_payload or {})
+        resolved_header_key = self._resolve_app_header_key(app_header_key)
+        key = self._resolve_runtime_key(runtime_key) if not resolved_header_key else ""
+        if not resolved_header_key and not key:
+            raise RuntimeError("Missing runtime key. Set ARA_RUNTIME_KEY, ARA_APP_HEADER_KEY, or run deploy/setup-auth first.")
+        return self.http.run_app(
+            str(app["id"]),
+            runtime_key=key,
+            app_header_key=resolved_header_key,
+            workflow_id=workflow_id,
+            input_payload=input_payload or {},
+        )
 
     def events(
         self,
@@ -1333,16 +1481,19 @@ class AraClient:
         metadata: Optional[dict[str, Any]] = None,
         idempotency_key: Optional[str] = None,
         runtime_key: Optional[str] = None,
+        app_header_key: Optional[str] = None,
     ) -> dict[str, Any]:
         app = self._find_app_by_slug()
         if not app:
             raise RuntimeError(f"App '{self.manifest.get('slug')}' not found. Deploy first.")
-        key = self._resolve_runtime_key(runtime_key)
-        if not key:
-            raise RuntimeError("Missing runtime key. Set ARA_RUNTIME_KEY or run deploy first.")
+        resolved_header_key = self._resolve_app_header_key(app_header_key)
+        key = self._resolve_runtime_key(runtime_key) if not resolved_header_key else ""
+        if not resolved_header_key and not key:
+            raise RuntimeError("Missing runtime key. Set ARA_RUNTIME_KEY, ARA_APP_HEADER_KEY, or run deploy/setup-auth first.")
         return self.http.send_event(
             str(app["id"]),
             runtime_key=key,
+            app_header_key=resolved_header_key,
             workflow_id=workflow_id,
             event_type=event_type,
             channel=channel,
@@ -1358,6 +1509,152 @@ class AraClient:
         if not app:
             raise RuntimeError(f"App '{self.manifest.get('slug')}' not found. Deploy first.")
         return self.http.setup(str(app["id"]))
+
+    def setup_auth(
+        self,
+        *,
+        x_key_name: Optional[str] = None,
+        x_key_rpm: int = 30,
+        ensure_runtime_key: bool = True,
+    ) -> dict[str, Any]:
+        app = self._find_app_by_slug()
+        if not app:
+            raise RuntimeError(f"App '{self.manifest.get('slug')}' not found. Deploy first.")
+        app_id = str(app["id"])
+
+        runtime_key = self._resolve_runtime_key()
+        runtime_key_created = False
+        if ensure_runtime_key and not runtime_key:
+            key_out = self.http.create_key(
+                app_id,
+                name=f"{self.manifest.get('slug')}-py-local",
+                requests_per_minute=60,
+            )
+            runtime_key = str(key_out.get("key") or "").strip()
+            if runtime_key:
+                runtime_key_created = True
+                key_path = self.cwd / ".runtime-key.local"
+                key_path.write_text(runtime_key + "\n", encoding="utf-8")
+                try:
+                    key_path.chmod(0o600)
+                except OSError:
+                    pass
+
+        app_header_key = self._resolve_app_header_key()
+        x_key_created = False
+        x_key_id = ""
+        x_key_prefix = ""
+        if not app_header_key:
+            created = self.http.create_x_key(
+                app_id,
+                name=(x_key_name or f"{self.manifest.get('slug')}-x-header"),
+                requests_per_minute=int(x_key_rpm),
+            )
+            app_header_key = str(created.get("key") or "").strip()
+            x_key_created = bool(app_header_key)
+            x_key_id = str(created.get("id") or "")
+            x_key_prefix = str(created.get("key_prefix") or "")
+            if app_header_key:
+                path = self._app_header_key_path()
+                path.write_text(
+                    json.dumps(
+                        {
+                            "app_id": app_id,
+                            "slug": self.manifest.get("slug"),
+                            "key": app_header_key,
+                            "key_prefix": x_key_prefix,
+                            "key_id": x_key_id,
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                        },
+                        indent=2,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                try:
+                    path.chmod(0o600)
+                except OSError:
+                    pass
+        else:
+            existing = self.http.list_x_keys(app_id).get("keys") or []
+            if isinstance(existing, list):
+                for item in existing:
+                    if str(item.get("is_active")).lower() == "false":
+                        continue
+                    prefix = str(item.get("key_prefix") or "")
+                    if prefix and app_header_key.startswith(prefix):
+                        x_key_id = str(item.get("id") or "")
+                        x_key_prefix = prefix
+                        break
+
+        return {
+            "app_id": app_id,
+            "slug": self.manifest.get("slug"),
+            "runtime_key_present": bool(runtime_key),
+            "runtime_key_created": runtime_key_created,
+            "app_header_key_present": bool(app_header_key),
+            "app_header_key_created": x_key_created,
+            "app_header_key_id": x_key_id,
+            "app_header_key_prefix": x_key_prefix,
+            "app_header_key": app_header_key,
+        }
+
+    def run_async(
+        self,
+        *,
+        workflow_id: Optional[str],
+        input_payload: Optional[dict[str, Any]] = None,
+        runtime_key: Optional[str] = None,
+        app_header_key: Optional[str] = None,
+        response_mode: str = "poll",
+        callback: Optional[dict[str, Any]] = None,
+        run_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        warmup: bool = False,
+    ) -> dict[str, Any]:
+        app = self._find_app_by_slug()
+        if not app:
+            raise RuntimeError(f"App '{self.manifest.get('slug')}' not found. Deploy first.")
+        resolved_header_key = self._resolve_app_header_key(app_header_key)
+        key = self._resolve_runtime_key(runtime_key) if not resolved_header_key else ""
+        if not resolved_header_key and not key:
+            raise RuntimeError("Missing runtime key. Set ARA_RUNTIME_KEY, ARA_APP_HEADER_KEY, or run deploy/setup-auth first.")
+        return self.http.submit_async_run(
+            str(app["id"]),
+            runtime_key=key,
+            app_header_key=resolved_header_key,
+            workflow_id=workflow_id,
+            input_payload=input_payload or {},
+            warmup=warmup,
+            run_id=run_id,
+            idempotency_key=idempotency_key,
+            response_mode=response_mode,
+            callback=callback,
+        )
+
+    def run_status(
+        self,
+        *,
+        run_id: str,
+        runtime_key: Optional[str] = None,
+        app_header_key: Optional[str] = None,
+    ) -> dict[str, Any]:
+        app = self._find_app_by_slug()
+        if not app:
+            raise RuntimeError(f"App '{self.manifest.get('slug')}' not found. Deploy first.")
+        rid = str(run_id or "").strip()
+        if not rid:
+            raise RuntimeError("run_status requires run_id")
+        resolved_header_key = self._resolve_app_header_key(app_header_key)
+        key = self._resolve_runtime_key(runtime_key) if not resolved_header_key else ""
+        if not resolved_header_key and not key:
+            raise RuntimeError("Missing runtime key. Set ARA_RUNTIME_KEY, ARA_APP_HEADER_KEY, or run deploy/setup-auth first.")
+        return self.http.get_async_run_status(
+            str(app["id"]),
+            rid,
+            runtime_key=key,
+            app_header_key=resolved_header_key,
+        )
 
     def invite(self, *, email: str, role: str = "viewer", expires_in_hours: int = 24 * 7) -> dict[str, Any]:
         app = self._find_app_by_slug()
@@ -1400,6 +1697,7 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
     p_run.add_argument("--workflow", default="")
     p_run.add_argument("--message", default="")
     p_run.add_argument("--input", action="append", default=[])
+    p_run.add_argument("--app-header-key", default="")
 
     p_events = sub.add_parser("events")
     p_events.add_argument("--workflow", default="")
@@ -1410,6 +1708,23 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
     p_events.add_argument("--input", action="append", default=[])
     p_events.add_argument("--metadata", action="append", default=[])
     p_events.add_argument("--idempotency-key", default="")
+    p_events.add_argument("--app-header-key", default="")
+
+    p_run_async = sub.add_parser("run-async")
+    p_run_async.add_argument("--workflow", default="")
+    p_run_async.add_argument("--message", default="")
+    p_run_async.add_argument("--input", action="append", default=[])
+    p_run_async.add_argument("--response-mode", choices=["poll", "webhook"], default="poll")
+    p_run_async.add_argument("--callback-url", default="")
+    p_run_async.add_argument("--callback-secret", default="")
+    p_run_async.add_argument("--callback-event", action="append", default=[])
+    p_run_async.add_argument("--run-id", default="")
+    p_run_async.add_argument("--idempotency-key", default="")
+    p_run_async.add_argument("--app-header-key", default="")
+
+    p_run_status = sub.add_parser("run-status")
+    p_run_status.add_argument("--run-id", default="")
+    p_run_status.add_argument("--app-header-key", default="")
 
     p_invite = sub.add_parser("invite")
     p_invite.add_argument("--email", default="")
@@ -1420,6 +1735,10 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
     p_local.add_argument("--input", action="append", default=[])
 
     sub.add_parser("setup")
+    p_setup_auth = sub.add_parser("setup-auth")
+    p_setup_auth.add_argument("--x-key-name", default="")
+    p_setup_auth.add_argument("--x-key-rpm", type=int, default=30)
+    p_setup_auth.add_argument("--ensure-runtime-key", default="true")
 
     args = parser.parse_args(argv)
     command = args.command or default_command
@@ -1443,6 +1762,9 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
                     "ok": True,
                     "slug": str(manifest.get("slug") or ""),
                     "runtime_key_written": True,
+                    "next": {
+                        "setup_auth_command": "python app.py setup-auth",
+                    },
                 },
                 indent=2,
             )
@@ -1456,7 +1778,16 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
         run_id = str(payload.get("run_id") or "").strip() or _new_run_id()
         payload.setdefault("run_id", run_id)
         payload.setdefault("idempotency_key", f"{_slugify(args.workflow or 'default')}-{_slugify(run_id)}")
-        print(json.dumps(client.run(workflow_id=args.workflow or None, input_payload=payload), indent=2))
+        print(
+            json.dumps(
+                client.run(
+                    workflow_id=args.workflow or None,
+                    input_payload=payload,
+                    app_header_key=args.app_header_key or None,
+                ),
+                indent=2,
+            )
+        )
         return
 
     if command == "events":
@@ -1474,10 +1805,49 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
                     payload=payload,
                     metadata=metadata,
                     idempotency_key=idem,
+                    app_header_key=args.app_header_key or None,
                 ),
                 indent=2,
             )
         )
+        return
+
+    if command == "run-async":
+        payload = _parse_pairs(args.input)
+        if args.message:
+            payload["message"] = args.message
+        run_id = str(args.run_id or "").strip() or _new_run_id()
+        idem = str(args.idempotency_key or "").strip() or f"run-{_slugify(run_id)}"
+        callback = None
+        if args.response_mode == "webhook":
+            if not str(args.callback_url or "").strip():
+                raise RuntimeError("run-async with --response-mode webhook requires --callback-url")
+            callback = {
+                "url": args.callback_url,
+                "secret": args.callback_secret or "",
+                "events": args.callback_event or ["run.completed", "run.failed"],
+            }
+        print(
+            json.dumps(
+                client.run_async(
+                    workflow_id=args.workflow or None,
+                    input_payload=payload,
+                    response_mode=args.response_mode,
+                    callback=callback,
+                    run_id=run_id,
+                    idempotency_key=idem,
+                    app_header_key=args.app_header_key or None,
+                ),
+                indent=2,
+            )
+        )
+        return
+
+    if command == "run-status":
+        rid = str(args.run_id or "").strip()
+        if not rid:
+            raise RuntimeError("run-status requires --run-id")
+        print(json.dumps(client.run_status(run_id=rid, app_header_key=args.app_header_key or None), indent=2))
         return
 
     if command == "invite":
@@ -1495,6 +1865,19 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
 
     if command == "setup":
         print(json.dumps(client.setup(), indent=2))
+        return
+
+    if command == "setup-auth":
+        print(
+            json.dumps(
+                client.setup_auth(
+                    x_key_name=args.x_key_name or None,
+                    x_key_rpm=int(args.x_key_rpm),
+                    ensure_runtime_key=str(args.ensure_runtime_key).lower() != "false",
+                ),
+                indent=2,
+            )
+        )
         return
 
     parser.print_help()
