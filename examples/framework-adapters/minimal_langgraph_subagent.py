@@ -3,13 +3,13 @@ from ara_sdk import App, git_artifact, langgraph_adapter, run_cli, sandbox
 app = App(
     "Framework Adapter Minimal (LangGraph)",
     project_name="framework-adapter-minimal-langgraph",
-    description="Minimal subagent example using langgraph_adapter.",
+    description="Minimal agent example using langgraph_adapter.",
 )
 
 
-@app.subagent(
+@app.agent(
     id="message-router",
-    workflow_id="route-message",
+    entrypoint=True,
     task="Route incoming messages to the framework worker.",
     sandbox=sandbox(max_concurrency=2),
     runtime={

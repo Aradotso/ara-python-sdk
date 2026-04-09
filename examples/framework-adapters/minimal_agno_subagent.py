@@ -3,13 +3,13 @@ from ara_sdk import App, agno_adapter, run_cli, sandbox, tarball_artifact
 app = App(
     "Framework Adapter Minimal (Agno)",
     project_name="framework-adapter-minimal-agno",
-    description="Minimal subagent example using agno_adapter.",
+    description="Minimal agent example using agno_adapter.",
 )
 
 
-@app.subagent(
+@app.agent(
     id="followup-writer",
-    workflow_id="draft-followup",
+    entrypoint=True,
     task="Draft concise follow-up text for pending threads.",
     sandbox=sandbox(max_concurrency=1),
     runtime={

@@ -1,4 +1,4 @@
-from ara_sdk import App, cron, run_cli, sandbox
+from ara_sdk import App, invoke, run_cli, sandbox, schedule
 
 app = App(
     "Meeting Booker",
@@ -7,24 +7,23 @@ app = App(
 )
 
 
-@app.subagent(
+@app.agent(
     id="booking-coordinator",
-    workflow_id="booking-coordinator",
+    entrypoint=True,
+    task="Coordinate scheduling and booking actions.",
     handoff_to=["calendar-strategist"],
+    schedules=[
+        schedule.cron(
+            id="daily-followups",
+            expr="0 13 * * 1-5",
+            timezone="UTC",
+            run=invoke.agent("booking-coordinator", input={"message": "Send reminders for pending confirmations."}),
+        )
+    ],
     sandbox=sandbox(max_concurrency=3),
 )
-def booking_coordinator(event=None):
+def booking_coordinator():
     """Coordinate scheduling and booking actions."""
-
-
-@app.hook(
-    id="daily-followups",
-    event="scheduler.followups",
-    schedule=cron("0 13 * * 1-5"),
-    agent="booking-coordinator",
-)
-def daily_followups():
-    """Send reminders for pending confirmations."""
 
 
 if __name__ == "__main__":

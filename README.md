@@ -17,7 +17,7 @@ pip install ara-sdk
 ## Quickstart
 
 ```python
-from ara_sdk import App, Secret, cron, run_cli, runtime, sandbox
+from ara_sdk import App, Secret, invoke, run_cli, runtime, schedule
 
 app = App(
     "Investor Meeting Booker",
@@ -31,23 +31,26 @@ app = App(
     ),
 )
 
-@app.subagent(
-    handoff_to=["calendar-strategist"],
-    sandbox=sandbox(
-        policy="dedicated",
-        key="booking-coordinator",
-        allow_spawn=True,
-        spawn_to=["calendar-strategist"],
-        max_spawn_depth=2,
-        child_policy="ephemeral",
-    ),
-)
-def booking_coordinator(event=None):
-    """Coordinate scheduling requests."""
+@app.tool(id="send_email", description="Send one email.")
+def send_email(to: str, subject: str, body: str) -> dict:
+    return {"ok": True, "to": to, "subject": subject}
 
-@app.hook(id="daily-followups", event="scheduler.followups", schedule=cron("0 13 * * 1-5"))
-def daily_followups():
-    """Send pending follow-ups."""
+DAILY_FOLLOWUPS = schedule.cron(
+    id="daily-followups",
+    expr="0 13 * * 1-5",
+    timezone="UTC",
+    run=invoke.agent("booking-coordinator", input={"message": "Send pending follow-ups."}),
+)
+
+@app.agent(
+    id="booking-coordinator",
+    entrypoint=True,
+    task="Coordinate scheduling requests.",
+    skills=["send_email", "automation_create", "automation_list"],
+    schedules=[DAILY_FOLLOWUPS],
+)
+def booking_coordinator():
+    """Coordinate scheduling requests."""
 
 if __name__ == "__main__":
     run_cli(app)
@@ -59,8 +62,8 @@ export OPENAI_API_KEY="your_provider_key"
 
 python app.py deploy
 python app.py setup-auth
-python app.py run --workflow booking-coordinator --message "Need 3 slots next week"
-python app.py run-async --workflow booking-coordinator --message "Need 3 slots next week" --response-mode poll
+python app.py run --agent booking-coordinator --message "Need 3 slots next week"
+python app.py run-async --agent booking-coordinator --message "Need 3 slots next week" --response-mode poll
 python app.py events --event-type channel.web.inbound --channel web --message "hello"
 python app.py setup
 ```
@@ -134,25 +137,21 @@ Backward compatibility is preserved by default. Non-shared placement only activa
 - `use_additional_sandbox=true`, or
 - `sandbox.enable_additional_sandbox=true`
 
-## Adapter helper surface
+## Scheduling model
 
-The SDK also exports optional helper utilities for adapter-style app runtimes:
+Use one schedule shape everywhere:
 
-- `command_adapter(...)`
-- `langchain_adapter(...)`
-- `langgraph_adapter(...)`
-- `agno_adapter(...)`
-- `git_artifact(...)`
-- `tarball_artifact(...)`
-- `event_envelope(...)`
+- `schedule.cron(...)` / `schedule.every(...)` for static declarations on `@app.agent`
+- `invoke.agent(...)` / `invoke.tool(...)` for schedule targets
+- `scheduler.create(spec)` for dynamic runtime automation payloads
 
 ## Examples
 
 See `examples/` for optional integrations and demo projects:
 
 - `examples/calcom-booking/`
-- `examples/framework-adapters/minimal_langgraph_subagent.py`
-- `examples/framework-adapters/minimal_agno_subagent.py`
+- `examples/framework-adapters/minimal_langgraph_subagent.py` (legacy)
+- `examples/framework-adapters/minimal_agno_subagent.py` (legacy)
 
 ## Security
 

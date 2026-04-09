@@ -531,34 +531,6 @@ def sandbox(
     return out
 
 
-def subagent_hook(
-    *,
-    event: str,
-    id: Optional[str] = None,
-    task: Optional[str] = None,
-    command: Optional[str] = None,
-    trigger: Optional[dict[str, Any]] = None,
-    schedule: Optional[dict[str, Any] | str] = None,
-    channel: str = "api",
-) -> dict[str, Any]:
-    evt = str(event or "").strip()
-    if not evt:
-        raise ValueError("subagent_hook() requires event")
-    if task and command:
-        raise ValueError("subagent_hook() accepts either task= or command=, not both")
-    hook_id = str(id or "").strip() or f"{_slugify(evt)}-hook"
-    out: dict[str, Any] = {"id": hook_id, "event": evt, "channel": str(channel or "api").strip() or "api"}
-    if task:
-        out["task"] = str(task).strip()
-    if command:
-        out["command"] = str(command).strip()
-    if trigger and isinstance(trigger, dict):
-        out["trigger"] = dict(trigger)
-    if schedule is not None:
-        out["schedule"] = schedule
-    return out
-
-
 def git_artifact(
     repo_url: str,
     *,
@@ -707,33 +679,102 @@ def event_envelope(
     }
 
 
-def _normalize_trigger(
-    trigger: Optional[dict[str, Any]],
-    schedule: Optional[dict[str, Any] | str],
-) -> tuple[dict[str, Any], str]:
-    trigger_cfg = dict(trigger) if isinstance(trigger, dict) else {}
-    schedule_expr = ""
-    if isinstance(schedule, dict):
-        schedule_expr = str(schedule.get("cron") or schedule.get("schedule") or "").strip()
-        trigger_cfg.setdefault("type", str(schedule.get("type") or "cron").strip() or "cron")
-        if schedule_expr:
-            trigger_cfg.setdefault("cron", schedule_expr)
-            trigger_cfg.setdefault("schedule", schedule_expr)
-        if schedule.get("timezone"):
-            trigger_cfg.setdefault("timezone", str(schedule.get("timezone")))
-    elif isinstance(schedule, str):
-        schedule_expr = schedule.strip()
-        if schedule_expr:
-            trigger_cfg.setdefault("type", "cron")
-            trigger_cfg.setdefault("cron", schedule_expr)
-            trigger_cfg.setdefault("schedule", schedule_expr)
+ScheduleRunSpec = dict[str, Any]
+ScheduleSpec = dict[str, Any]
+
+
+def _normalize_string_items(raw: Optional[list[str]]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw or []:
+        value = str(item or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _normalize_schedule_run(run: Any) -> ScheduleRunSpec:
+    if not isinstance(run, dict):
+        raise ValueError("schedule run must be a dict")
+    run_type = str(run.get("type") or "").strip().lower()
+    if run_type == "agent":
+        agent_id = str(run.get("agent_id") or run.get("agent") or "").strip()
+        if not agent_id:
+            raise ValueError("invoke.agent(...) requires non-empty agent id")
+        input_payload = run.get("input") if isinstance(run.get("input"), dict) else {}
+        return {"type": "agent", "agent_id": agent_id, "input": dict(input_payload)}
+    if run_type == "tool":
+        tool_name = str(run.get("tool_name") or run.get("tool") or "").strip()
+        if not tool_name:
+            raise ValueError("invoke.tool(...) requires non-empty tool name")
+        args = run.get("args") if isinstance(run.get("args"), dict) else {}
+        return {"type": "tool", "tool_name": tool_name, "args": dict(args)}
+    raise ValueError("schedule run type must be 'agent' or 'tool'")
+
+
+def _normalize_schedule_spec(spec: Any) -> ScheduleSpec:
+    if not isinstance(spec, dict):
+        raise ValueError("schedule spec must be a dict")
+    schedule_id = str(spec.get("id") or "").strip()
+    if not schedule_id:
+        raise ValueError("schedule id is required")
+    kind = str(spec.get("kind") or "").strip().lower()
+    if kind not in {"cron", "every"}:
+        raise ValueError("schedule kind must be 'cron' or 'every'")
+    run = _normalize_schedule_run(spec.get("run"))
+    if kind == "cron":
+        expr = str(spec.get("cron") or spec.get("expr") or "").strip()
+        if not expr:
+            raise ValueError("cron schedule requires expr/cron")
+        timezone_name = str(spec.get("timezone") or "UTC").strip() or "UTC"
+        return {
+            "id": schedule_id,
+            "kind": "cron",
+            "cron": expr,
+            "timezone": timezone_name,
+            "run": run,
+        }
+    seconds_raw = spec.get("every_seconds", spec.get("seconds"))
+    try:
+        seconds = int(seconds_raw)
+    except (TypeError, ValueError):
+        raise ValueError("every schedule requires integer seconds") from None
+    if seconds < 60:
+        raise ValueError("every schedule minimum interval is 60 seconds")
+    return {
+        "id": schedule_id,
+        "kind": "every",
+        "every_seconds": seconds,
+        "run": run,
+    }
+
+
+def _schedule_spec_to_automation_args(spec: Any) -> dict[str, Any]:
+    normalized = _normalize_schedule_spec(spec)
+    run = normalized["run"]
+    args: dict[str, Any] = {
+        "name": normalized["id"],
+        "schedule_kind": normalized["kind"],
+    }
+    if normalized["kind"] == "cron":
+        args["schedule_expr"] = normalized["cron"]
+        args["timezone"] = normalized.get("timezone") or "UTC"
     else:
-        schedule_expr = str(trigger_cfg.get("cron") or trigger_cfg.get("schedule") or "").strip()
-    if not trigger_cfg:
-        trigger_cfg = {"type": "api"}
-    if "type" not in trigger_cfg:
-        trigger_cfg["type"] = "api"
-    return trigger_cfg, schedule_expr
+        args["every_seconds"] = int(normalized["every_seconds"])
+
+    if run["type"] == "agent":
+        args["execution_kind"] = "app_agent_call"
+        args["agent_id"] = run["agent_id"]
+        if run.get("input"):
+            args["input"] = run["input"]
+    else:
+        args["execution_kind"] = "app_tool_call"
+        args["tool_name"] = run["tool_name"]
+        if run.get("args"):
+            args["tool_args"] = run["args"]
+    return args
 
 
 class App:
@@ -762,170 +803,87 @@ class App:
         self._agent = dict(agent or {})
         self._interfaces = dict(interfaces or {})
         self._runtime_profile = dict(runtime_profile or {})
-        self._workflows: list[dict[str, Any]] = []
-        self._profiles: list[dict[str, Any]] = []
-        self._subagents: list[dict[str, Any]] = []
-        self._handlers: list[dict[str, Any]] = []
+        self._agents: list[dict[str, Any]] = []
         self._tools: list[dict[str, Any]] = []
+        self._default_agent_id: str = ""
         self._local_entrypoint: Optional[Callable[..., Any]] = None
 
-    def _upsert(self, rows: list[dict[str, Any]], item: dict[str, Any], *, key: str = "id") -> None:
-        item_key = str(item.get(key) or "")
-        if not item_key:
+    def _upsert_agent(self, item: dict[str, Any]) -> None:
+        item_id = str(item.get("id") or "").strip()
+        if not item_id:
             return
-        for idx, existing in enumerate(rows):
-            if str(existing.get(key) or "") == item_key:
-                rows[idx] = item
+        for idx, existing in enumerate(self._agents):
+            if str(existing.get("id") or "").strip() == item_id:
+                self._agents[idx] = item
                 return
-        rows.append(item)
+        self._agents.append(item)
+
+    @staticmethod
+    def _workflow_for_agent(agent_row: dict[str, Any], *, trigger: Optional[dict[str, Any]] = None, workflow_id: Optional[str] = None, task: Optional[str] = None) -> dict[str, Any]:
+        agent_id = str(agent_row.get("id") or "").strip()
+        instructions = str(agent_row.get("instructions") or agent_row.get("task") or "").strip()
+        trigger_cfg = dict(trigger or {"type": "api"})
+        schedule_expr = str(trigger_cfg.get("cron") or trigger_cfg.get("schedule") or "").strip()
+        if schedule_expr and str(trigger_cfg.get("type") or "").strip().lower() == "cron":
+            trigger_cfg.setdefault("schedule", schedule_expr)
+            trigger_cfg.setdefault("cron", schedule_expr)
+            trigger_cfg.setdefault("timezone", "UTC")
+        return {
+            "id": str(workflow_id or agent_id),
+            "mode": "task",
+            "agent_id": agent_id,
+            "task": str(task or instructions or f"Run agent {agent_id}").strip(),
+            "run": {},
+            "pipeline": [],
+            "schedule": schedule_expr,
+            "trigger": trigger_cfg,
+        }
 
     def agent(
         self,
         id: Optional[str] = None,
         *,
+        task: str = "",
         instructions: str = "",
+        entrypoint: bool = False,
+        skills: Optional[list[str]] = None,
+        schedules: Optional[list[dict[str, Any]]] = None,
         handoff_to: Optional[list[str]] = None,
-        always_on: bool = True,
-    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-            profile_id = str(id or _slugify(fn.__name__.replace("_", "-"))).strip()
-            if not profile_id:
-                raise ValueError("@app.agent requires a non-empty id")
-            text = str(instructions or fn.__doc__ or "").strip()
-            profile = {
-                "id": profile_id,
-                "instructions": text,
-                "persona": text,
-                "handoff_to": [str(x).strip() for x in (handoff_to or []) if str(x).strip()],
-                "always_on": bool(always_on),
-            }
-            self._upsert(self._profiles, profile)
-            setattr(fn, "__ara_agent_profile__", profile)
-            return fn
-
-        return decorator
-
-    def task(
-        self,
-        *,
-        id: Optional[str] = None,
-        agent: Optional[str] = None,
-        task: Optional[str] = None,
-        trigger: Optional[dict[str, Any]] = None,
-        schedule: Optional[dict[str, Any] | str] = None,
-    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-            workflow_id = str(id or _slugify(fn.__name__.replace("_", "-"))).strip()
-            if not workflow_id:
-                raise ValueError("@app.task requires a non-empty id")
-            trigger_cfg, schedule_expr = _normalize_trigger(trigger, schedule)
-            item: dict[str, Any] = {
-                "id": workflow_id,
-                "mode": "task",
-                "task": str(task or fn.__doc__ or "").strip() or f"Execute workflow {workflow_id}",
-                "trigger": trigger_cfg,
-                "run": {},
-                "pipeline": [],
-            }
-            if agent:
-                item["agent_id"] = str(agent).strip()
-            if schedule_expr:
-                item["schedule"] = schedule_expr
-            self._upsert(self._workflows, item)
-            setattr(fn, "__ara_workflow__", item)
-            return fn
-
-        return decorator
-
-    def hook(
-        self,
-        *,
-        id: Optional[str] = None,
-        event: str = "hook.tick",
-        agent: Optional[str] = None,
-        task: Optional[str] = None,
-        command: Optional[str] = None,
-        trigger: Optional[dict[str, Any]] = None,
-        schedule: Optional[dict[str, Any] | str] = None,
-    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-            workflow_id = str(id or _slugify(fn.__name__.replace("_", "-"))).strip()
-            if not workflow_id:
-                raise ValueError("@app.hook requires a non-empty id")
-            event_name = str(event or "hook.tick").strip() or "hook.tick"
-            trigger_cfg = dict(trigger or {})
-            trigger_cfg.setdefault("type", "api")
-            trigger_cfg.setdefault("event", event_name)
-            if command:
-                self._upsert(
-                    self._workflows,
-                    {
-                        "id": workflow_id,
-                        "mode": "run",
-                        "task": "",
-                        "run": {"command": str(command).strip()},
-                        "pipeline": [],
-                        "trigger": trigger_cfg,
-                        "schedule": str(schedule or "").strip() if isinstance(schedule, str) else "",
-                    },
-                )
-            else:
-                self.task(
-                    id=workflow_id,
-                    agent=agent,
-                    task=str(task or fn.__doc__ or "").strip() or f"Handle hook '{event_name}'",
-                    trigger=trigger_cfg,
-                    schedule=schedule,
-                )(fn)
-            setattr(fn, "__ara_hook__", {"id": workflow_id, "event": event_name})
-            return fn
-
-        return decorator
-
-    def subagent(
-        self,
-        id: Optional[str] = None,
-        *,
-        workflow_id: Optional[str] = None,
-        instructions: str = "",
-        handoff_to: Optional[list[str]] = None,
-        always_on: bool = True,
-        task: Optional[str] = None,
-        trigger: Optional[dict[str, Any]] = None,
-        schedule: Optional[dict[str, Any] | str] = None,
         runtime: Optional[dict[str, Any]] = None,
         sandbox: Optional[dict[str, Any]] = None,
-        channels: Optional[list[str]] = None,
-        hooks: Optional[list[dict[str, Any]]] = None,
+        always_on: bool = True,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-            profile_id = str(id or _slugify(fn.__name__.replace("_", "-"))).strip()
-            wf_id = str(workflow_id or profile_id).strip()
-            if not profile_id or not wf_id:
-                raise ValueError("@app.subagent requires non-empty id/workflow_id")
-            self.agent(
-                profile_id,
-                instructions=instructions,
-                handoff_to=handoff_to,
-                always_on=always_on,
-            )(fn)
-            self.task(
-                id=wf_id,
-                agent=profile_id,
-                task=str(task or fn.__doc__ or "").strip() or f"Execute subagent {profile_id}",
-                trigger=trigger,
-                schedule=schedule,
-            )(fn)
-            sub = {
-                "id": profile_id,
-                "workflow_id": wf_id,
-                "channels": sorted({str(c).strip().lower() for c in (channels or []) if str(c).strip()}),
-                "runtime": dict(runtime or {}),
-                "sandbox": dict(sandbox or {"policy": "shared", "max_concurrency": DEFAULT_SUBAGENT_MAX_CONCURRENCY}),
-                "hooks": [dict(h) for h in (hooks or []) if isinstance(h, dict)],
+            agent_id = str(id or _slugify(fn.__name__.replace("_", "-"))).strip()
+            if not agent_id:
+                raise ValueError("@app.agent requires a non-empty id")
+            task_text = str(task or instructions or fn.__doc__ or "").strip() or f"Run agent {agent_id}"
+            instructions_text = str(instructions or task_text).strip()
+            normalized_schedules: list[dict[str, Any]] = []
+            for schedule_item in schedules or []:
+                normalized_schedules.append(_normalize_schedule_spec(schedule_item))
+            agent_row: dict[str, Any] = {
+                "id": agent_id,
+                "task": task_text,
+                "instructions": instructions_text,
+                "persona": instructions_text,
+                "schedules": normalized_schedules,
+                "handoff_to": _normalize_string_items(handoff_to),
+                "always_on": bool(always_on),
+                "entrypoint": bool(entrypoint),
             }
-            self._upsert(self._subagents, sub)
-            setattr(fn, "__ara_subagent__", sub)
+            if skills is not None:
+                agent_row["skills"] = _normalize_string_items(skills)
+            if isinstance(runtime, dict) and runtime:
+                runtime_cfg = dict(runtime)
+                runtime_cfg.pop("__secret_definitions", None)
+                agent_row["runtime"] = runtime_cfg
+            if isinstance(sandbox, dict) and sandbox:
+                agent_row["sandbox"] = dict(sandbox)
+            self._upsert_agent(agent_row)
+            if entrypoint or not self._default_agent_id:
+                self._default_agent_id = agent_id
+            setattr(fn, "__ara_agent__", agent_row)
             return fn
 
         return decorator
@@ -937,41 +895,10 @@ class App:
 
         return decorator
 
-    def handler(
-        self,
-        *,
-        id: Optional[str] = None,
-        description: str = "",
-    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-            handler_id = str(id or _slugify(fn.__name__.replace("_", "-"))).strip()
-            if not handler_id:
-                raise ValueError("@app.handler requires a non-empty id")
-            try:
-                raw_source = inspect.getsource(fn)
-            except (OSError, TypeError):
-                raise ValueError("@app.handler requires source-visible functions (no lambdas/dynamic defs)") from None
-            source = _strip_leading_decorators(raw_source)
-            if not source.startswith("def "):
-                raise ValueError("@app.handler only supports standard def functions")
-            item = {
-                "id": handler_id,
-                "function_name": fn.__name__,
-                "description": str(description or fn.__doc__ or "").strip(),
-                "parameters": _callable_parameters_schema(fn),
-                "source": source,
-            }
-            self._upsert(self._handlers, item)
-            setattr(fn, "__ara_handler__", item)
-            return fn
-
-        return decorator
-
     def tool(
         self,
         *,
         id: Optional[str] = None,
-        handler: Optional[str] = None,
         description: str = "",
         parameters: Optional[dict[str, Any]] = None,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -979,17 +906,35 @@ class App:
             tool_id = str(id or _slugify(fn.__name__.replace("_", "-"))).strip()
             if not tool_id:
                 raise ValueError("@app.tool requires a non-empty id")
-            handler_id = str(handler or tool_id).strip()
-            if not handler_id:
-                raise ValueError("@app.tool requires a non-empty handler id")
+            try:
+                raw_source = inspect.getsource(fn)
+            except (OSError, TypeError):
+                raise ValueError("@app.tool requires source-visible functions (no lambdas/dynamic defs)") from None
+            source = _strip_leading_decorators(raw_source)
+            if not source.startswith("def "):
+                raise ValueError("@app.tool only supports standard def functions")
             params_schema = dict(parameters) if isinstance(parameters, dict) else _callable_parameters_schema(fn)
+            tool_description = str(description or fn.__doc__ or "").strip()
             item = {
-                "id": tool_id,
-                "handler_id": handler_id,
-                "description": str(description or fn.__doc__ or "").strip(),
-                "parameters": params_schema,
+                "type": "function",
+                "function": {
+                    "name": tool_id,
+                    "description": tool_description,
+                    "parameters": params_schema,
+                },
+                "function_name": fn.__name__,
+                "source": source,
             }
-            self._upsert(self._tools, item)
+            replaced = False
+            for idx, existing in enumerate(self._tools):
+                existing_fn = existing.get("function") if isinstance(existing.get("function"), dict) else {}
+                existing_name = str(existing_fn.get("name") or "").strip()
+                if existing_name == tool_id:
+                    self._tools[idx] = item
+                    replaced = True
+                    break
+            if not replaced:
+                self._tools.append(item)
             setattr(fn, "__ara_tool__", item)
             return fn
 
@@ -1010,24 +955,170 @@ class App:
     @property
     def manifest(self) -> dict[str, Any]:
         agent = dict(self._agent)
-        if self._profiles:
-            agent["profiles"] = list(self._profiles)
-            agent.setdefault("default_profile_id", str(self._profiles[0].get("id") or "default"))
-        if self._subagents:
-            agent["subagents"] = list(self._subagents)
-        if self._handlers:
-            agent["handlers"] = list(self._handlers)
+        workflows: list[dict[str, Any]] = []
+
+        if self._agents:
+            agent_rows = [dict(row) for row in self._agents]
+            agent["agents"] = agent_rows
+            default_agent_id = str(self._default_agent_id or self._agents[0].get("id") or "").strip()
+            if default_agent_id:
+                agent["default_agent_id"] = default_agent_id
+
+            profiles: list[dict[str, Any]] = []
+            subagents: list[dict[str, Any]] = []
+            for row in agent_rows:
+                agent_id = str(row.get("id") or "").strip()
+                if not agent_id:
+                    continue
+                instructions = str(row.get("instructions") or row.get("task") or "").strip()
+                profile = {
+                    "id": agent_id,
+                    "instructions": instructions,
+                    "persona": instructions,
+                    "handoff_to": _normalize_string_items(row.get("handoff_to") if isinstance(row.get("handoff_to"), list) else []),
+                    "always_on": bool(row.get("always_on", True)),
+                }
+                if isinstance(row.get("skills"), list):
+                    profile["skills"] = _normalize_string_items(row["skills"])
+                profiles.append(profile)
+
+                runtime_cfg = dict(row.get("runtime") or {})
+                runtime_cfg.pop("__secret_definitions", None)
+                subagents.append(
+                    {
+                        "id": agent_id,
+                        "workflow_id": agent_id,
+                        "channels": [],
+                        "runtime": runtime_cfg,
+                        "sandbox": dict(row.get("sandbox") or {"policy": "shared", "max_concurrency": DEFAULT_SUBAGENT_MAX_CONCURRENCY}),
+                        "hooks": [],
+                    }
+                )
+
+                workflows.append(self._workflow_for_agent(row, workflow_id=agent_id))
+                schedules = row.get("schedules") if isinstance(row.get("schedules"), list) else []
+                for schedule_spec in schedules:
+                    normalized_schedule = _normalize_schedule_spec(schedule_spec)
+                    if normalized_schedule.get("kind") != "cron":
+                        continue
+                    schedule_run = normalized_schedule.get("run") if isinstance(normalized_schedule.get("run"), dict) else {}
+                    schedule_run_type = str(schedule_run.get("type") or "").strip().lower()
+                    run_agent_id = str(schedule_run.get("agent_id") or agent_id).strip() if schedule_run_type == "agent" else agent_id
+                    workflow_id = f"{agent_id}--{normalized_schedule['id']}"
+                    trigger = {
+                        "type": "cron",
+                        "cron": str(normalized_schedule.get("cron") or "").strip(),
+                        "schedule": str(normalized_schedule.get("cron") or "").strip(),
+                        "timezone": str(normalized_schedule.get("timezone") or "UTC").strip() or "UTC",
+                    }
+                    schedule_task = str(row.get("task") or instructions or f"Run agent {run_agent_id}").strip()
+                    workflows.append(
+                        self._workflow_for_agent(
+                            {
+                                "id": run_agent_id,
+                                "task": schedule_task,
+                                "instructions": str(schedule_run.get("input", {}).get("message") or schedule_task).strip(),
+                            },
+                            trigger=trigger,
+                            workflow_id=workflow_id,
+                            task=schedule_task,
+                        )
+                    )
+
+            if profiles:
+                agent["profiles"] = profiles
+                if default_agent_id:
+                    agent["default_profile_id"] = default_agent_id
+            if subagents:
+                agent["subagents"] = subagents
+
         if self._tools:
             agent["tools"] = list(self._tools)
+
         return {
             "name": self.name,
             "slug": self.slug,
             "description": self.description,
             "agent": agent,
-            "workflows": list(self._workflows),
+            "workflows": workflows,
             "interfaces": dict(self._interfaces),
             "runtime_profile": dict(self._runtime_profile),
         }
+
+
+class _Invoke:
+    @staticmethod
+    def agent(agent_id: str, *, input: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        resolved_agent_id = str(agent_id or "").strip()
+        if not resolved_agent_id:
+            raise ValueError("invoke.agent(...) requires a non-empty agent_id")
+        return {
+            "type": "agent",
+            "agent_id": resolved_agent_id,
+            "input": dict(input or {}),
+        }
+
+    @staticmethod
+    def tool(tool_name: str, *, args: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        resolved_tool_name = str(tool_name or "").strip()
+        if not resolved_tool_name:
+            raise ValueError("invoke.tool(...) requires a non-empty tool name")
+        return {
+            "type": "tool",
+            "tool_name": resolved_tool_name,
+            "args": dict(args or {}),
+        }
+
+
+class _Schedule:
+    @staticmethod
+    def cron(*, id: str, expr: str, timezone: str = "UTC", run: dict[str, Any]) -> dict[str, Any]:
+        spec = {
+            "id": str(id or "").strip(),
+            "kind": "cron",
+            "cron": str(expr or "").strip(),
+            "timezone": str(timezone or "UTC").strip() or "UTC",
+            "run": dict(run or {}),
+        }
+        return _normalize_schedule_spec(spec)
+
+    @staticmethod
+    def every(*, id: str, seconds: int, run: dict[str, Any]) -> dict[str, Any]:
+        spec = {
+            "id": str(id or "").strip(),
+            "kind": "every",
+            "every_seconds": int(seconds),
+            "run": dict(run or {}),
+        }
+        return _normalize_schedule_spec(spec)
+
+
+class _Scheduler:
+    @staticmethod
+    def create(spec: dict[str, Any], *, app_id: Optional[str] = None) -> dict[str, Any]:
+        args = _schedule_spec_to_automation_args(spec)
+        if app_id:
+            args["app_id"] = str(app_id).strip()
+        return {
+            "tool": "automation_create",
+            "args": args,
+        }
+
+    @staticmethod
+    def upsert(spec: dict[str, Any], *, app_id: Optional[str] = None) -> dict[str, Any]:
+        args = _schedule_spec_to_automation_args(spec)
+        if app_id:
+            args["app_id"] = str(app_id).strip()
+        args["upsert"] = True
+        return {
+            "tool": "automation_create",
+            "args": args,
+        }
+
+
+invoke = _Invoke()
+schedule = _Schedule()
+scheduler = _Scheduler()
 
 
 def _read_dotenv(path: pathlib.Path) -> None:
@@ -1131,7 +1222,7 @@ class _Http:
         *,
         runtime_key: Optional[str] = None,
         app_header_key: Optional[str] = None,
-        workflow_id: Optional[str],
+        agent_id: Optional[str],
         input_payload: dict[str, Any],
         warmup: bool = False,
     ):
@@ -1148,7 +1239,7 @@ class _Http:
             f"/v1/apps/{app_id}/run",
             method="POST",
             headers=headers,
-            body={"workflow_id": workflow_id, "warmup": bool(warmup), "input": input_payload},
+            body={"agent_id": agent_id, "workflow_id": agent_id, "warmup": bool(warmup), "input": input_payload},
             auth_header=auth_header,
         )
 
@@ -1158,7 +1249,7 @@ class _Http:
         *,
         runtime_key: Optional[str] = None,
         app_header_key: Optional[str] = None,
-        workflow_id: Optional[str],
+        agent_id: Optional[str],
         event_type: str,
         channel: str,
         source: str,
@@ -1183,7 +1274,8 @@ class _Http:
             method="POST",
             headers=headers,
             body={
-                "workflow_id": workflow_id,
+                "agent_id": agent_id,
+                "workflow_id": agent_id,
                 "event_type": event_type,
                 "channel": channel,
                 "source": source,
@@ -1200,7 +1292,7 @@ class _Http:
         *,
         runtime_key: Optional[str] = None,
         app_header_key: Optional[str] = None,
-        workflow_id: Optional[str],
+        agent_id: Optional[str],
         input_payload: dict[str, Any],
         warmup: bool = False,
         run_id: Optional[str] = None,
@@ -1218,7 +1310,8 @@ class _Http:
         else:
             raise RuntimeError("submit_async_run requires runtime_key or app_header_key")
         body: dict[str, Any] = {
-            "workflow_id": workflow_id,
+            "agent_id": agent_id,
+            "workflow_id": agent_id,
             "warmup": bool(warmup),
             "input": input_payload,
             "response_mode": response_mode,
@@ -1370,7 +1463,7 @@ class AraClient:
         key_name: Optional[str] = None,
         key_rpm: int = 60,
         warm: bool = False,
-        warm_workflow_id: Optional[str] = None,
+        warm_agent_id: Optional[str] = None,
         on_existing: Optional[str] = "update",
     ) -> dict[str, Any]:
         if on_existing is None:
@@ -1432,7 +1525,7 @@ class AraClient:
             warmup = self.http.run_app(
                 app_id,
                 runtime_key=runtime_key,
-                workflow_id=warm_workflow_id,
+                agent_id=warm_agent_id,
                 input_payload={},
                 warmup=True,
             )
@@ -1449,7 +1542,7 @@ class AraClient:
     def run(
         self,
         *,
-        workflow_id: Optional[str],
+        agent_id: Optional[str],
         input_payload: Optional[dict[str, Any]] = None,
         runtime_key: Optional[str] = None,
         app_header_key: Optional[str] = None,
@@ -1465,14 +1558,14 @@ class AraClient:
             str(app["id"]),
             runtime_key=key,
             app_header_key=resolved_header_key,
-            workflow_id=workflow_id,
+            agent_id=agent_id,
             input_payload=input_payload or {},
         )
 
     def events(
         self,
         *,
-        workflow_id: Optional[str],
+        agent_id: Optional[str],
         event_type: str,
         channel: str,
         source: str,
@@ -1494,7 +1587,7 @@ class AraClient:
             str(app["id"]),
             runtime_key=key,
             app_header_key=resolved_header_key,
-            workflow_id=workflow_id,
+            agent_id=agent_id,
             event_type=event_type,
             channel=channel,
             source=source,
@@ -1602,7 +1695,7 @@ class AraClient:
     def run_async(
         self,
         *,
-        workflow_id: Optional[str],
+        agent_id: Optional[str],
         input_payload: Optional[dict[str, Any]] = None,
         runtime_key: Optional[str] = None,
         app_header_key: Optional[str] = None,
@@ -1623,7 +1716,7 @@ class AraClient:
             str(app["id"]),
             runtime_key=key,
             app_header_key=resolved_header_key,
-            workflow_id=workflow_id,
+            agent_id=agent_id,
             input_payload=input_payload or {},
             warmup=warmup,
             run_id=run_id,
@@ -1687,20 +1780,20 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
     _deploy_parent.add_argument("--key-name", default="")
     _deploy_parent.add_argument("--rpm", type=int, default=60)
     _deploy_parent.add_argument("--warm", default="false")
-    _deploy_parent.add_argument("--warm-workflow", default="")
+    _deploy_parent.add_argument("--warm-agent", default="")
     _deploy_parent.add_argument("--on-existing", choices=["update", "error"], default="update")
 
     sub.add_parser("deploy", parents=[_deploy_parent])
     sub.add_parser("up", parents=[_deploy_parent])
 
     p_run = sub.add_parser("run")
-    p_run.add_argument("--workflow", default="")
+    p_run.add_argument("--agent", default="")
     p_run.add_argument("--message", default="")
     p_run.add_argument("--input", action="append", default=[])
     p_run.add_argument("--app-header-key", default="")
 
     p_events = sub.add_parser("events")
-    p_events.add_argument("--workflow", default="")
+    p_events.add_argument("--agent", default="")
     p_events.add_argument("--event-type", default="webhook.message.received")
     p_events.add_argument("--channel", default="webhook")
     p_events.add_argument("--source", default="webhook")
@@ -1711,7 +1804,7 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
     p_events.add_argument("--app-header-key", default="")
 
     p_run_async = sub.add_parser("run-async")
-    p_run_async.add_argument("--workflow", default="")
+    p_run_async.add_argument("--agent", default="")
     p_run_async.add_argument("--message", default="")
     p_run_async.add_argument("--input", action="append", default=[])
     p_run_async.add_argument("--response-mode", choices=["poll", "webhook"], default="poll")
@@ -1752,7 +1845,7 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
             "key_name": args.key_name or None,
             "key_rpm": int(args.rpm),
             "warm": str(args.warm).lower() == "true",
-            "warm_workflow_id": args.warm_workflow or None,
+            "warm_agent_id": args.warm_agent or None,
             "on_existing": args.on_existing,
         }
         client.deploy(**deploy_kwargs)
@@ -1777,11 +1870,11 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
             payload["message"] = args.message
         run_id = str(payload.get("run_id") or "").strip() or _new_run_id()
         payload.setdefault("run_id", run_id)
-        payload.setdefault("idempotency_key", f"{_slugify(args.workflow or 'default')}-{_slugify(run_id)}")
+        payload.setdefault("idempotency_key", f"{_slugify(args.agent or 'default-agent')}-{_slugify(run_id)}")
         print(
             json.dumps(
                 client.run(
-                    workflow_id=args.workflow or None,
+                    agent_id=args.agent or None,
                     input_payload=payload,
                     app_header_key=args.app_header_key or None,
                 ),
@@ -1797,7 +1890,7 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
         print(
             json.dumps(
                 client.events(
-                    workflow_id=args.workflow or None,
+                    agent_id=args.agent or None,
                     event_type=args.event_type,
                     channel=args.channel,
                     source=args.source,
@@ -1830,7 +1923,7 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
         print(
             json.dumps(
                 client.run_async(
-                    workflow_id=args.workflow or None,
+                    agent_id=args.agent or None,
                     input_payload=payload,
                     response_mode=args.response_mode,
                     callback=callback,

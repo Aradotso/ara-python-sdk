@@ -3,7 +3,7 @@ import urllib.error
 
 import pytest
 
-from ara_sdk import App, Secret, cron, runtime, sandbox
+from ara_sdk import App, Secret, invoke, runtime, sandbox, schedule, scheduler
 from ara_sdk import core
 
 
@@ -12,71 +12,116 @@ def test_app_manifest_project_name_slug_priority():
     assert app.slug == "team-internal-app"
 
 
-def test_subagent_registers_profile_and_workflow():
+def test_agent_registers_profile_and_workflow():
     app = App(name="Test App")
 
-    @app.subagent(
+    @app.agent(
         id="booking-coordinator",
-        workflow_id="booking-coordinator",
-        instructions="Coordinate booking tasks.",
-        schedule=cron("0 10 * * 1-5"),
+        task="Coordinate booking tasks.",
+        entrypoint=True,
+        skills=["send_email", "automation_create"],
+        schedules=[
+            schedule.cron(
+                id="weekday-digest",
+                expr="0 10 * * 1-5",
+                timezone="UTC",
+                run=invoke.agent("booking-coordinator", input={"message": "send digest"}),
+            )
+        ],
         runtime=runtime(memory_mb=1024),
         sandbox=sandbox(max_concurrency=3),
     )
     def booking():
-        """Coordinate booking workflows."""
+        """Coordinate booking agent workflows."""
 
     manifest = app.manifest
+    agents = manifest["agent"]["agents"]
     profiles = manifest["agent"]["profiles"]
     workflows = manifest["workflows"]
     subagents = manifest["agent"]["subagents"]
 
+    assert agents[0]["id"] == "booking-coordinator"
+    assert agents[0]["skills"] == ["send_email", "automation_create"]
+    assert agents[0]["schedules"][0]["kind"] == "cron"
     assert profiles[0]["id"] == "booking-coordinator"
     assert workflows[0]["id"] == "booking-coordinator"
-    assert workflows[0]["trigger"]["type"] == "cron"
+    assert workflows[0]["trigger"]["type"] == "api"
+    assert workflows[1]["trigger"]["type"] == "cron"
     assert subagents[0]["sandbox"]["max_concurrency"] == 3
 
 
-def test_handler_and_tool_manifest_shape():
+def test_agent_omits_skills_when_unspecified_and_strips_runtime_secret_defs():
+    app = App(name="No Skills Agent App")
+    agent_runtime = runtime(
+        secrets=[Secret.from_dict("provider-local", {"OPENAI_API_KEY": "sk-test"})],
+    )
+
+    @app.agent(
+        id="general-agent",
+        task="Handle generic requests.",
+        runtime=agent_runtime,
+    )
+    def general_agent():
+        """General agent."""
+
+    manifest = app.manifest
+    agents = manifest["agent"]["agents"]
+    profiles = manifest["agent"]["profiles"]
+    subagents = manifest["agent"]["subagents"]
+
+    assert "skills" not in agents[0]
+    assert "skills" not in profiles[0]
+    assert "__secret_definitions" not in agents[0]["runtime"]
+    assert "__secret_definitions" not in subagents[0]["runtime"]
+
+
+def test_tool_manifest_shape():
     app = App(name="Tooling App")
 
-    @app.handler(id="send-email")
     def send_email(to: str, subject: str, body: str) -> dict:
         """Send an email payload."""
         return {"ok": True, "to": to, "subject": subject, "body": body}
 
-    @app.tool(id="send_email", handler="send-email")
-    def send_email_tool(to: str, subject: str, body: str):
-        """Send email via handler."""
+    app.tool(id="send_email", description="Send email via tool.")(send_email)
 
     manifest = app.manifest
-    handlers = manifest["agent"]["handlers"]
     tools = manifest["agent"]["tools"]
 
-    assert handlers[0]["id"] == "send-email"
-    assert handlers[0]["function_name"] == "send_email"
-    assert handlers[0]["parameters"]["properties"]["to"]["type"] == "string"
-    assert handlers[0]["source"].startswith("def send_email")
-
-    assert tools[0]["id"] == "send_email"
-    assert tools[0]["handler_id"] == "send-email"
-    assert tools[0]["parameters"]["properties"]["subject"]["type"] == "string"
+    assert tools[0]["type"] == "function"
+    assert tools[0]["function"]["name"] == "send_email"
+    assert tools[0]["function"]["description"] == "Send email via tool."
+    assert tools[0]["function"]["parameters"]["properties"]["subject"]["type"] == "string"
+    assert tools[0]["function_name"] == "send_email"
+    assert tools[0]["source"].startswith("def send_email")
 
 
-def test_handler_supports_multiline_decorator_arguments():
+def test_tool_supports_multiline_decorator_arguments():
     app = App(name="Tooling App")
 
-    @app.handler(
-        id="send-email",
+    @app.tool(
+        id="send_email",
         description="Send an email payload.",
     )
     def send_email(to: str):
         return {"ok": True, "to": to}
 
-    handlers = app.manifest["agent"]["handlers"]
-    assert len(handlers) == 1
-    assert handlers[0]["id"] == "send-email"
-    assert handlers[0]["source"].startswith("def send_email")
+    tools = app.manifest["agent"]["tools"]
+    assert len(tools) == 1
+    assert tools[0]["function"]["name"] == "send_email"
+    assert tools[0]["source"].startswith("def send_email")
+
+
+def test_schedule_and_scheduler_builders():
+    job = schedule.every(
+        id="heartbeat",
+        seconds=3600,
+        run=invoke.tool("send_email", args={"to": "sveinung@ara.so", "subject": "hi", "body": "hello"}),
+    )
+    payload = scheduler.create(job, app_id="app_demo_1")
+    assert payload["tool"] == "automation_create"
+    assert payload["args"]["execution_kind"] == "app_tool_call"
+    assert payload["args"]["app_id"] == "app_demo_1"
+    assert payload["args"]["tool_name"] == "send_email"
 
 
 def test_sandbox_allows_multisandbox_spawn_shape():
@@ -302,11 +347,11 @@ class _FakeHttp:
         *,
         runtime_key: str | None = None,
         app_header_key: str | None = None,
-        workflow_id: str | None,
+        agent_id: str | None,
         input_payload: dict,
         warmup: bool = False,
     ) -> dict:
-        _ = (app_id, runtime_key, app_header_key, workflow_id, input_payload, warmup)
+        _ = (app_id, runtime_key, app_header_key, agent_id, input_payload, warmup)
         self.calls.append("run_app")
         return {"ok": True}
 
@@ -316,7 +361,7 @@ class _FakeHttp:
         *,
         runtime_key: str | None = None,
         app_header_key: str | None = None,
-        workflow_id: str | None,
+        agent_id: str | None,
         input_payload: dict,
         warmup: bool = False,
         run_id: str | None = None,
@@ -328,7 +373,7 @@ class _FakeHttp:
             app_id,
             runtime_key,
             app_header_key,
-            workflow_id,
+            agent_id,
             input_payload,
             warmup,
             run_id,
@@ -381,7 +426,7 @@ def test_deploy_syncs_local_secrets_before_warmup(tmp_path):
     fake_http = _FakeHttp()
     client.http = fake_http
 
-    out = client.deploy(warm=True, warm_workflow_id="warmup-flow")
+    out = client.deploy(warm=True, warm_agent_id="booking-coordinator")
 
     assert fake_http.created_payload is not None
     assert "__secret_definitions" not in fake_http.created_payload["runtime_profile"]
@@ -486,7 +531,7 @@ def test_run_async_and_status_support_header_key(tmp_path):
     client.http = fake_http
 
     submit = client.run_async(
-        workflow_id="booking-coordinator",
+        agent_id="booking-coordinator",
         input_payload={"message": "hello"},
         app_header_key="aik_app_inline_key",
         run_id="run_inline_1",
