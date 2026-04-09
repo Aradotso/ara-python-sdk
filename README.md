@@ -97,6 +97,8 @@ The SDK also exports optional helper utilities for adapter-style app runtimes:
 See `examples/` for optional integrations and demo projects:
 
 - `examples/calcom-booking/`
+- `examples/framework-adapters/minimal_langgraph_subagent.py`
+- `examples/framework-adapters/minimal_agno_subagent.py`
 
 ## Security
 

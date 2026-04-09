@@ -33,8 +33,18 @@ Issues = "https://github.com/Aradotso/ara-python-sdk/issues"
 [project.scripts]
 ara-sdk = "ara_sdk.__main__:main"
 
+[tool.hatch.build]
+exclude = [
+  "/examples/**",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/ara_sdk"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "/examples/**",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
