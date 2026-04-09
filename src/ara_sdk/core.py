@@ -429,13 +429,6 @@ def runtime(
     return profile
 
 
-def cron(expression: str, *, timezone: str = "UTC") -> dict[str, Any]:
-    expr = str(expression or "").strip()
-    if not expr:
-        raise ValueError("cron() requires a non-empty expression")
-    return {"type": "cron", "cron": expr, "schedule": expr, "timezone": str(timezone or "UTC")}
-
-
 def sandbox(
     *,
     policy: str = "shared",
