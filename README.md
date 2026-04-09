@@ -37,7 +37,7 @@ def booking_coordinator(event=None):
 
 @app.hook(id="daily-followups", event="scheduler.followups", schedule=cron("0 13 * * 1-5"))
 def daily_followups():
-    """Send pending followups."""
+    """Send pending follow-ups."""
 
 if __name__ == "__main__":
     run_cli(app)
