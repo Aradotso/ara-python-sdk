@@ -1105,9 +1105,11 @@ class AraClient:
         key_rpm: int = 60,
         warm: bool = False,
         warm_workflow_id: Optional[str] = None,
-        on_existing: Optional[str] = None,
+        on_existing: Optional[str] = "update",
     ) -> dict[str, Any]:
-        if on_existing not in (None, "update", "error"):
+        if on_existing is None:
+            on_existing = "update"
+        if on_existing not in ("update", "error"):
             raise ValueError("on_existing must be one of: update, error")
 
         existing = self._find_app_by_slug()
@@ -1257,7 +1259,7 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
     _deploy_parent.add_argument("--rpm", type=int, default=60)
     _deploy_parent.add_argument("--warm", default="false")
     _deploy_parent.add_argument("--warm-workflow", default="")
-    _deploy_parent.add_argument("--on-existing", choices=["update", "error"])
+    _deploy_parent.add_argument("--on-existing", choices=["update", "error"], default="update")
 
     sub.add_parser("deploy", parents=[_deploy_parent])
     sub.add_parser("up", parents=[_deploy_parent])
@@ -1300,9 +1302,8 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
             "key_rpm": int(args.rpm),
             "warm": str(args.warm).lower() == "true",
             "warm_workflow_id": args.warm_workflow or None,
+            "on_existing": args.on_existing,
         }
-        if args.on_existing:
-            deploy_kwargs["on_existing"] = args.on_existing
         client.deploy(**deploy_kwargs)
         print(
             json.dumps(

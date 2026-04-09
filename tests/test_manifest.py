@@ -323,6 +323,29 @@ def test_deploy_surfaces_backend_secrets_route_compat_error(tmp_path):
         client.deploy()
 
 
+def test_deploy_defaults_to_update_when_app_exists(tmp_path):
+    client = core.AraClient(
+        manifest=_manifest_with_runtime(runtime_profile={}),
+        api_base_url="https://api.ara.so",
+        api_key="token",
+        cwd=tmp_path,
+    )
+
+    class _ExistingHttp(_FakeHttp):
+        def list_apps(self) -> dict:
+            self.calls.append("list_apps")
+            return {"apps": [{"id": "app_existing_1", "slug": "test-app", "role": "owner"}]}
+
+    fake_http = _ExistingHttp()
+    client.http = fake_http
+
+    out = client.deploy()
+
+    assert out["app_id"] == "app_existing_1"
+    assert "create_app" not in fake_http.calls
+    assert "update_app" in fake_http.calls
+
+
 def test_cli_up_alias_dispatches_to_deploy(monkeypatch, capsys):
     class _StubClient:
         def __init__(self):
@@ -358,6 +381,7 @@ def test_cli_up_alias_dispatches_to_deploy(monkeypatch, capsys):
 
     assert stub.kwargs is not None
     assert stub.kwargs["warm"] is True
+    assert stub.kwargs["on_existing"] == "update"
     cli_out = capsys.readouterr().out
     assert '"ok": true' in cli_out.lower()
     assert '"slug": "test-app"' in cli_out.lower()
