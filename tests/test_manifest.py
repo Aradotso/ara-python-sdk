@@ -37,6 +37,48 @@ def test_subagent_registers_profile_and_workflow():
     assert subagents[0]["sandbox"]["max_concurrency"] == 3
 
 
+def test_handler_and_tool_manifest_shape():
+    app = App(name="Tooling App")
+
+    @app.handler(id="send-email")
+    def send_email(to: str, subject: str, body: str) -> dict:
+        """Send an email payload."""
+        return {"ok": True, "to": to, "subject": subject, "body": body}
+
+    @app.tool(id="send_email", handler="send-email")
+    def send_email_tool(to: str, subject: str, body: str):
+        """Send email via handler."""
+
+    manifest = app.manifest
+    handlers = manifest["agent"]["handlers"]
+    tools = manifest["agent"]["tools"]
+
+    assert handlers[0]["id"] == "send-email"
+    assert handlers[0]["function_name"] == "send_email"
+    assert handlers[0]["parameters"]["properties"]["to"]["type"] == "string"
+    assert handlers[0]["source"].startswith("def send_email")
+
+    assert tools[0]["id"] == "send_email"
+    assert tools[0]["handler_id"] == "send-email"
+    assert tools[0]["parameters"]["properties"]["subject"]["type"] == "string"
+
+
+def test_handler_supports_multiline_decorator_arguments():
+    app = App(name="Tooling App")
+
+    @app.handler(
+        id="send-email",
+        description="Send an email payload.",
+    )
+    def send_email(to: str):
+        return {"ok": True, "to": to}
+
+    handlers = app.manifest["agent"]["handlers"]
+    assert len(handlers) == 1
+    assert handlers[0]["id"] == "send-email"
+    assert handlers[0]["source"].startswith("def send_email")
+
+
 def test_sandbox_allows_multisandbox_spawn_shape():
     cfg = sandbox(
         policy="dedicated",

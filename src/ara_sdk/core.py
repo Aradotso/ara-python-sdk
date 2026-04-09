@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import inspect
 import json
 import os
 import pathlib
 import re
+import textwrap
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -91,6 +93,72 @@ def _normalize_required_keys(required_keys: Optional[list[str]]) -> list[str]:
         seen.add(key)
         out.append(key)
     return out
+
+
+def _annotation_to_json_schema(annotation: Any) -> dict[str, Any]:
+    if annotation is inspect._empty or annotation is None:
+        return {"type": "string"}
+    if annotation is str:
+        return {"type": "string"}
+    if annotation is bool:
+        return {"type": "boolean"}
+    if annotation is int:
+        return {"type": "integer"}
+    if annotation is float:
+        return {"type": "number"}
+    if annotation in (dict,):
+        return {"type": "object"}
+    if annotation in (list, tuple, set):
+        return {"type": "array"}
+    origin = getattr(annotation, "__origin__", None)
+    if origin in (dict,):
+        return {"type": "object"}
+    if origin in (list, tuple, set):
+        return {"type": "array"}
+    if origin is Callable:
+        return {"type": "string"}
+    return {"type": "string"}
+
+
+def _callable_parameters_schema(fn: Callable[..., Any]) -> dict[str, Any]:
+    signature = inspect.signature(fn)
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    for param in signature.parameters.values():
+        if param.kind not in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            continue
+        schema = _annotation_to_json_schema(param.annotation)
+        if param.default is not inspect._empty:
+            try:
+                json.dumps(param.default)
+                schema["default"] = param.default
+            except TypeError:
+                pass
+        properties[param.name] = schema
+        if param.default is inspect._empty:
+            required.append(param.name)
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+    }
+
+
+def _strip_leading_decorators(source: str) -> str:
+    dedented = textwrap.dedent(source)
+    try:
+        module = ast.parse(dedented)
+    except SyntaxError:
+        return dedented.strip()
+
+    lines = dedented.splitlines()
+    for node in module.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return "\n".join(lines[node.lineno - 1 :]).strip()
+    return dedented.strip()
 
 
 class SecretDefinition:
@@ -697,6 +765,8 @@ class App:
         self._workflows: list[dict[str, Any]] = []
         self._profiles: list[dict[str, Any]] = []
         self._subagents: list[dict[str, Any]] = []
+        self._handlers: list[dict[str, Any]] = []
+        self._tools: list[dict[str, Any]] = []
         self._local_entrypoint: Optional[Callable[..., Any]] = None
 
     def _upsert(self, rows: list[dict[str, Any]], item: dict[str, Any], *, key: str = "id") -> None:
@@ -867,6 +937,64 @@ class App:
 
         return decorator
 
+    def handler(
+        self,
+        *,
+        id: Optional[str] = None,
+        description: str = "",
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+            handler_id = str(id or _slugify(fn.__name__.replace("_", "-"))).strip()
+            if not handler_id:
+                raise ValueError("@app.handler requires a non-empty id")
+            try:
+                raw_source = inspect.getsource(fn)
+            except (OSError, TypeError):
+                raise ValueError("@app.handler requires source-visible functions (no lambdas/dynamic defs)") from None
+            source = _strip_leading_decorators(raw_source)
+            if not source.startswith("def "):
+                raise ValueError("@app.handler only supports standard def functions")
+            item = {
+                "id": handler_id,
+                "function_name": fn.__name__,
+                "description": str(description or fn.__doc__ or "").strip(),
+                "parameters": _callable_parameters_schema(fn),
+                "source": source,
+            }
+            self._upsert(self._handlers, item)
+            setattr(fn, "__ara_handler__", item)
+            return fn
+
+        return decorator
+
+    def tool(
+        self,
+        *,
+        id: Optional[str] = None,
+        handler: Optional[str] = None,
+        description: str = "",
+        parameters: Optional[dict[str, Any]] = None,
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+            tool_id = str(id or _slugify(fn.__name__.replace("_", "-"))).strip()
+            if not tool_id:
+                raise ValueError("@app.tool requires a non-empty id")
+            handler_id = str(handler or tool_id).strip()
+            if not handler_id:
+                raise ValueError("@app.tool requires a non-empty handler id")
+            params_schema = dict(parameters) if isinstance(parameters, dict) else _callable_parameters_schema(fn)
+            item = {
+                "id": tool_id,
+                "handler_id": handler_id,
+                "description": str(description or fn.__doc__ or "").strip(),
+                "parameters": params_schema,
+            }
+            self._upsert(self._tools, item)
+            setattr(fn, "__ara_tool__", item)
+            return fn
+
+        return decorator
+
     def call_local_entrypoint(self, input_payload: dict[str, str]) -> Any:
         if self._local_entrypoint is None:
             raise RuntimeError("No @app.local_entrypoint() registered")
@@ -887,6 +1015,10 @@ class App:
             agent.setdefault("default_profile_id", str(self._profiles[0].get("id") or "default"))
         if self._subagents:
             agent["subagents"] = list(self._subagents)
+        if self._handlers:
+            agent["handlers"] = list(self._handlers)
+        if self._tools:
+            agent["tools"] = list(self._tools)
         return {
             "name": self.name,
             "slug": self.slug,
