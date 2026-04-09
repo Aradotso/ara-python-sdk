@@ -12,7 +12,7 @@ pip install ara-sdk
 
 - Public SDK is generic and provider-agnostic.
 - Runtime policy, retries, and safety controls are enforced server-side.
-- Optional integrations (Cal.com, CRM, etc.) live in examples, not in the core package.
+- Optional integrations (Cal.com, CRM, etc.) live in examples, not in the core SDK package.
 
 ## Quickstart
 
