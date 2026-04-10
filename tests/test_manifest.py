@@ -124,6 +124,15 @@ def test_schedule_and_scheduler_builders():
     assert payload["args"]["tool_name"] == "send_email"
 
 
+def test_schedule_rejects_legacy_agent_field():
+    with pytest.raises(ValueError, match="invoke\\.agent\\(\\.\\.\\.\\) requires non-empty agent id"):
+        schedule.cron(
+            id="daily",
+            expr="0 9 * * *",
+            run={"type": "agent", "agent": "booking-coordinator"},
+        )
+
+
 def test_sandbox_allows_multisandbox_spawn_shape():
     cfg = sandbox(
         policy="dedicated",

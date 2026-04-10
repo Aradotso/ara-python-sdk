@@ -693,7 +693,7 @@ def _normalize_schedule_run(run: Any) -> ScheduleRunSpec:
         raise ValueError("schedule run must be a dict")
     run_type = str(run.get("type") or "").strip().lower()
     if run_type == "agent":
-        agent_id = str(run.get("agent_id") or run.get("agent") or "").strip()
+        agent_id = str(run.get("agent_id") or "").strip()
         if not agent_id:
             raise ValueError("invoke.agent(...) requires non-empty agent id")
         input_payload = run.get("input") if isinstance(run.get("input"), dict) else {}
