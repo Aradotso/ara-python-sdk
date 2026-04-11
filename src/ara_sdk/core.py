@@ -1541,13 +1541,9 @@ class AraClient:
         _read_dotenv(base / ".env")
         if not os.getenv("ARA_API_BASE_URL", "").strip():
             os.environ["ARA_API_BASE_URL"] = DEFAULT_API_BASE_URL
-        # Prefer long-lived SDK API key; keep legacy access token as fallback.
-        api_key = os.getenv("ARA_API_KEY", "").strip() or os.getenv("ARA_ACCESS_TOKEN", "").strip()
+        api_key = os.getenv("ARA_API_KEY", "").strip()
         if not api_key:
-            raise RuntimeError(
-                "Missing required env var: ARA_API_KEY. "
-                "Legacy ARA_ACCESS_TOKEN is still accepted as a fallback."
-            )
+            raise RuntimeError("Missing required env var: ARA_API_KEY.")
         return cls(
             manifest=manifest,
             api_base_url=os.getenv("ARA_API_BASE_URL", DEFAULT_API_BASE_URL).strip() or DEFAULT_API_BASE_URL,
@@ -1940,12 +1936,9 @@ class AraRuntimeClient:
         _read_dotenv(base / ".env")
         if not os.getenv("ARA_API_BASE_URL", "").strip():
             os.environ["ARA_API_BASE_URL"] = DEFAULT_API_BASE_URL
-        api_key = os.getenv("ARA_API_KEY", "").strip() or os.getenv("ARA_ACCESS_TOKEN", "").strip()
+        api_key = os.getenv("ARA_API_KEY", "").strip()
         if not api_key:
-            raise RuntimeError(
-                "Missing required env var: ARA_API_KEY. "
-                "Legacy ARA_ACCESS_TOKEN is still accepted as a fallback."
-            )
+            raise RuntimeError("Missing required env var: ARA_API_KEY.")
         return cls(
             api_base_url=os.getenv("ARA_API_BASE_URL", DEFAULT_API_BASE_URL).strip() or DEFAULT_API_BASE_URL,
             api_key=api_key,

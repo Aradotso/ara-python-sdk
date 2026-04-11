@@ -285,22 +285,19 @@ def test_runtime_includes_env_and_secret_refs():
     assert len(profile["__secret_definitions"]) == 2
 
 
-def test_from_env_prefers_api_key_over_legacy_access_token(monkeypatch, tmp_path):
+def test_from_env_uses_api_key(monkeypatch, tmp_path):
     monkeypatch.setenv("ARA_API_BASE_URL", "https://api.ara.so")
     monkeypatch.setenv("ARA_API_KEY", "ara_api_key_primary_0123456789abcdef")
-    monkeypatch.setenv("ARA_ACCESS_TOKEN", "legacy-token")
 
     client = core.AraClient.from_env(manifest=_manifest_with_runtime(runtime_profile={}), cwd=str(tmp_path))
     assert client.http.api_key == "ara_api_key_primary_0123456789abcdef"
 
 
-def test_from_env_accepts_legacy_access_token_fallback(monkeypatch, tmp_path):
+def test_from_env_requires_api_key(monkeypatch, tmp_path):
     monkeypatch.setenv("ARA_API_BASE_URL", "https://api.ara.so")
     monkeypatch.delenv("ARA_API_KEY", raising=False)
-    monkeypatch.setenv("ARA_ACCESS_TOKEN", "legacy-token")
-
-    client = core.AraClient.from_env(manifest=_manifest_with_runtime(runtime_profile={}), cwd=str(tmp_path))
-    assert client.http.api_key == "legacy-token"
+    with pytest.raises(RuntimeError, match="Missing required env var: ARA_API_KEY."):
+        core.AraClient.from_env(manifest=_manifest_with_runtime(runtime_profile={}), cwd=str(tmp_path))
 
 
 def test_runtime_auth_resolution_ignores_local_key_files(monkeypatch, tmp_path):
@@ -869,7 +866,6 @@ def test_cli_local_does_not_require_api_key(monkeypatch, capsys):
         return {"echo": str(input_payload.get("text") or "")}
 
     monkeypatch.delenv("ARA_API_KEY", raising=False)
-    monkeypatch.delenv("ARA_ACCESS_TOKEN", raising=False)
 
     def _from_env_should_not_run(cls, *, manifest, cwd=None):  # noqa: ARG001
         raise AssertionError("AraClient.from_env should not run for local command")
@@ -897,7 +893,6 @@ def test_cli_local_loads_dotenv_without_api_key(monkeypatch, tmp_path, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("LOCAL_ONLY_VALUE", raising=False)
     monkeypatch.delenv("ARA_API_KEY", raising=False)
-    monkeypatch.delenv("ARA_ACCESS_TOKEN", raising=False)
 
     def _from_env_should_not_run(cls, *, manifest, cwd=None):  # noqa: ARG001
         raise AssertionError("AraClient.from_env should not run for local command")

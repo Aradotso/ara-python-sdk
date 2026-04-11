@@ -13,7 +13,7 @@ for parent in pathlib.Path(__file__).resolve().parents:
 from ara_sdk import App, local_file, runtime
 
 ROOT = pathlib.Path(__file__).resolve().parent
-SCRIPT_SOURCE_FILE = ROOT / "scripts" / "title_case.py"
+SCRIPT_SOURCE_FILE = ROOT / "assets" / "01-b-agent-skills-loading-title_case.py"
 SCRIPT_PATH = "scripts/title_case.py"
 
 app = App(
@@ -116,4 +116,3 @@ def local(input_payload: dict[str, str]):
         ),
         "runtime_files": app.manifest.get("runtime_profile", {}).get("files", []),
     }
-

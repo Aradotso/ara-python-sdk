@@ -46,4 +46,3 @@ def local(input_payload: dict[str, str]):
         "entrypoint": adapter["entrypoint"],
         "message": input_payload.get("message", "hello from agno example"),
     }
-

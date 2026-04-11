@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import importlib.util
 import json
 import time
 import urllib.error
@@ -9,7 +10,18 @@ from typing import Any
 
 from ara_sdk import AraClient
 
-from app import app as demo_app
+
+def _load_demo_app():
+    app_path = Path(__file__).with_name("03-async-ngrok-webhook.py")
+    spec = importlib.util.spec_from_file_location("async_ngrok_webhook_app", app_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load app module: {app_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    demo_app = getattr(module, "app", None)
+    if demo_app is None:
+        raise RuntimeError(f"Loaded module missing 'app': {app_path}")
+    return demo_app
 
 
 def _parse_pairs(items: list[str]) -> dict[str, str]:
@@ -66,6 +78,7 @@ def main() -> None:
     parser.add_argument("--app-header-key", default="")
     args = parser.parse_args()
 
+    demo_app = _load_demo_app()
     client = AraClient.from_env(manifest=demo_app.manifest, cwd=str(Path(__file__).parent))
 
     if args.setup_auth:

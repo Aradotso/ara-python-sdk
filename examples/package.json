@@ -1,10 +1,11 @@
 {
-  "name": "canonical-email-chat-cron-web",
+  "name": "ara-sdk-examples-web",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:canonical-email-chat-cron": "vite --open /frontend/02-canonical-email-chat-cron/index.html",
     "build": "vite build",
     "preview": "vite preview"
   },

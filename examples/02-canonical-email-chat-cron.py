@@ -137,4 +137,3 @@ def local(input_payload):
         "input": input_payload,
         "chat_agent_id": CHAT_AGENT_ID,
     }
-

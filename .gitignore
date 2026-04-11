@@ -11,5 +11,6 @@ build/
 *.egg-info/
 .venv/
 .env
+.env.local
 .runtime-key.local
 .app-header-key.local

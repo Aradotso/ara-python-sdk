@@ -11,16 +11,17 @@ import time
 import pytest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-EXAMPLES_ROOT = REPO_ROOT / "examples" / "agent-skills-loading"
-EXAMPLE_VARIANT_FOLDERS = (
-    "01-inline-instructions",
-    "02-script-referenced",
-    "03-decorator-handler",
+EXAMPLES_ROOT = REPO_ROOT / "examples"
+EXAMPLE_VARIANT_FILES = (
+    "01-a-agent-skills-loading.py",
+    "01-b-agent-skills-loading.py",
+    "01-c-agent-skills-loading.py",
 )
 
 
 def _run_app_json(
     cwd: pathlib.Path,
+    app_file: str,
     *args: str,
     env: dict[str, str] | None = None,
     timeout: int = 180,
@@ -31,8 +32,8 @@ def _run_app_json(
         merged_env.update(env)
     if not args:
         raise AssertionError("Expected at least one CLI command argument")
-    command = [sys.executable, "-m", "ara_sdk", args[0], "app.py", *args[1:]]
-    if args[0] == "local" and not (merged_env.get("ARA_API_KEY") or merged_env.get("ARA_ACCESS_TOKEN")):
+    command = [sys.executable, "-m", "ara_sdk", args[0], app_file, *args[1:]]
+    if args[0] == "local" and not merged_env.get("ARA_API_KEY"):
         merged_env["ARA_API_KEY"] = "local-demo-key"
     transient_markers = (
         "failed (500)",
@@ -85,8 +86,8 @@ def _extract_output_text(run_payload: dict) -> str:
     return str(value or "").strip()
 
 
-def _load_example_module(name: str, folder: str):
-    path = EXAMPLES_ROOT / folder / "app.py"
+def _load_example_module(name: str, file_name: str):
+    path = EXAMPLES_ROOT / file_name
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
         raise AssertionError(f"Failed to load module spec: {path}")
@@ -97,8 +98,8 @@ def _load_example_module(name: str, folder: str):
 
 def test_examples_do_not_inject_fake_api_keys() -> None:
     # Regression guard: examples must not silently inject fake auth keys.
-    for folder in EXAMPLE_VARIANT_FOLDERS:
-        source = (EXAMPLES_ROOT / folder / "app.py").read_text(encoding="utf-8")
+    for file_name in EXAMPLE_VARIANT_FILES:
+        source = (EXAMPLES_ROOT / file_name).read_text(encoding="utf-8")
         assert "local-demo-key" not in source
         assert 'sys.argv[1] == "local"' not in source
 
@@ -106,14 +107,14 @@ def test_examples_do_not_inject_fake_api_keys() -> None:
 def test_example_local_entrypoints_smoke() -> None:
     # Even without a CLI `local` subcommand, examples still expose local entrypoints
     # that can be invoked directly for deterministic metadata inspection.
-    inline_mod = _load_example_module("skill_inline_example", "01-inline-instructions")
+    inline_mod = _load_example_module("skill_inline_example", "01-a-agent-skills-loading.py")
     inline = inline_mod.app.call_local_entrypoint({"text": "hello from ara sdk"})
     assert inline["ok"] is True
     assert inline["mode"] == "inline-instructions-only"
     assert "python3 -c " in inline["command_to_run"]
     assert " -- " in inline["command_to_run"]
 
-    script_mod = _load_example_module("skill_script_example", "02-script-referenced")
+    script_mod = _load_example_module("skill_script_example", "01-b-agent-skills-loading.py")
     script = script_mod.app.call_local_entrypoint({"text": "hello from ara sdk"})
     assert script["ok"] is True
     assert script["mode"] == "runtime-file-upload-reference"
@@ -122,7 +123,7 @@ def test_example_local_entrypoints_smoke() -> None:
     assert isinstance(runtime_files, list) and runtime_files
     assert runtime_files[0]["path"] == "scripts/title_case.py"
 
-    decorator_mod = _load_example_module("skill_decorator_example", "03-decorator-handler")
+    decorator_mod = _load_example_module("skill_decorator_example", "01-c-agent-skills-loading.py")
     decorator = decorator_mod.app.call_local_entrypoint({"text": "hello from ara sdk"})
     assert decorator["ok"] is True
     assert decorator["method"] == "decorator-handler"
@@ -139,19 +140,19 @@ def test_live_reliability_probe_three_of_three() -> None:
 
     cases = [
         {
-            "folder": "01-inline-instructions",
+            "file": "01-a-agent-skills-loading.py",
             "agent": "title-case-inline-instructions-agent",
             "probe_expected": "PROBE:inline-ok:Hello From Ara Sdk",
             "normal_expected": "Hello From Ara Sdk",
         },
         {
-            "folder": "02-script-referenced",
+            "file": "01-b-agent-skills-loading.py",
             "agent": "title-case-runtime-file-agent",
             "probe_expected": "PROBE:script-ok:Hello From Ara Sdk",
             "normal_expected": "Hello From Ara Sdk",
         },
         {
-            "folder": "03-decorator-handler",
+            "file": "01-c-agent-skills-loading.py",
             "agent": "title-case-decorator-agent",
             "probe_expected": "PROBE:decorator-ok:Hello From Ara Sdk",
             "normal_expected": "Hello From Ara Sdk",
@@ -159,16 +160,16 @@ def test_live_reliability_probe_three_of_three() -> None:
     ]
 
     for case in cases:
-        cwd = EXAMPLES_ROOT / case["folder"]
-        deploy_payload = _run_app_json(cwd, "deploy", timeout=240, retries=2)
+        deploy_payload = _run_app_json(EXAMPLES_ROOT, case["file"], "deploy", timeout=240, retries=2)
         runtime_key = str(deploy_payload.get("runtime_key") or "").strip()
         if not runtime_key:
-            raise AssertionError(f"deploy did not return runtime_key for {case['folder']}")
+            raise AssertionError(f"deploy did not return runtime_key for {case['file']}")
 
         probe_outputs: list[str] = []
         for _attempt in range(3):
             run_payload = _run_app_json(
-                cwd,
+                EXAMPLES_ROOT,
+                case["file"],
                 "run",
                 "--agent",
                 case["agent"],
@@ -185,7 +186,8 @@ def test_live_reliability_probe_three_of_three() -> None:
         assert probe_outputs == [case["probe_expected"]] * 3
 
         normal_payload = _run_app_json(
-            cwd,
+            EXAMPLES_ROOT,
+            case["file"],
             "run",
             "--agent",
             case["agent"],

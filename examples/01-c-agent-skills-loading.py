@@ -88,4 +88,3 @@ def local(input_payload: dict[str, str]):
     if not text:
         return {"ok": False, "error": "Provide --input text='hello world'"}
     return title_case_decorator(text)
-

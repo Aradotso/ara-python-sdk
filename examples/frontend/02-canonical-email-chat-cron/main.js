@@ -1,5 +1,6 @@
+const FIXED_API_BASE_URL = "https://api.ara.so";
+
 const defaults = {
-  apiBase: import.meta.env.VITE_ARA_API_BASE_URL || "https://api.ara.so",
   appId: import.meta.env.VITE_ARA_APP_ID || "",
   runtimeKey: import.meta.env.VITE_ARA_RUNTIME_KEY || "",
   agentId: import.meta.env.VITE_ARA_CHAT_AGENT_ID || "demo-chat",
@@ -7,7 +8,6 @@ const defaults = {
 };
 
 const els = {
-  apiBase: document.getElementById("apiBase"),
   appId: document.getElementById("appId"),
   runtimeKey: document.getElementById("runtimeKey"),
   agentId: document.getElementById("agentId"),
@@ -31,7 +31,6 @@ function loadConfig() {
   try {
     const parsed = JSON.parse(raw);
     return {
-      apiBase: pickNonEmpty(parsed?.apiBase, defaults.apiBase),
       appId: pickNonEmpty(parsed?.appId, defaults.appId),
       runtimeKey: pickNonEmpty(parsed?.runtimeKey, defaults.runtimeKey),
       agentId: pickNonEmpty(parsed?.agentId, defaults.agentId),
@@ -44,7 +43,6 @@ function loadConfig() {
 
 function saveConfig() {
   const cfg = {
-    apiBase: pickNonEmpty(els.apiBase.value, defaults.apiBase),
     appId: pickNonEmpty(els.appId.value, defaults.appId),
     runtimeKey: pickNonEmpty(els.runtimeKey.value, defaults.runtimeKey),
     agentId: pickNonEmpty(els.agentId.value, defaults.agentId),
@@ -107,7 +105,7 @@ function parseExtraInput(raw) {
 }
 
 async function sendMessage(cfg, inputPayload) {
-  const url = `${cfg.apiBase.replace(/\/+$/, "")}/v1/apps/${cfg.appId}/run`;
+  const url = `${FIXED_API_BASE_URL}/v1/apps/${cfg.appId}/run`;
   const response = await fetch(url, {
     method: "POST",
     headers: {
@@ -130,7 +128,6 @@ async function sendMessage(cfg, inputPayload) {
 }
 
 const initial = loadConfig();
-els.apiBase.value = initial.apiBase || defaults.apiBase;
 els.appId.value = initial.appId || "";
 els.runtimeKey.value = initial.runtimeKey || "";
 els.agentId.value = initial.agentId || defaults.agentId;

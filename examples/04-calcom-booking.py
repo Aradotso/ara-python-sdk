@@ -40,4 +40,3 @@ Send reminders for pending booking confirmations.
     return """
 Coordinate scheduling and booking actions.
 """.strip()
-

@@ -75,4 +75,3 @@ def local(input_payload: dict[str, str]):
         "input_text": resolved_text,
         "command_to_run": ARGV_COMMAND_TEMPLATE.format(quoted_text=shlex.quote(resolved_text)),
     }
-

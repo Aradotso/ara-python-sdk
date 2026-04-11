@@ -23,4 +23,3 @@ Reply concisely to the provided input message.
     return """
 Reply with a short friendly message.
 """.strip()
-

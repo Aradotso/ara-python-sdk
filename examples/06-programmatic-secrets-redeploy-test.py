@@ -2,17 +2,31 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import pathlib
 import sys
 
-SDK_SRC = pathlib.Path(__file__).resolve().parents[2] / "src"
-if str(SDK_SRC) not in sys.path:
-    sys.path.insert(0, str(SDK_SRC))
+for parent in pathlib.Path(__file__).resolve().parents:
+    src_dir = parent / "src"
+    if (src_dir / "ara_sdk").exists():
+        sys.path.insert(0, str(src_dir))
+        break
 
 from ara_sdk import AraClient
 
-from app import build_app
+
+def _load_build_app():
+    module_path = pathlib.Path(__file__).with_name("06-programmatic-secrets-redeploy.py")
+    spec = importlib.util.spec_from_file_location("programmatic_secrets_redeploy_example", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load example module: {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    build_app = getattr(module, "build_app", None)
+    if build_app is None:
+        raise RuntimeError(f"Loaded module missing build_app(): {module_path}")
+    return build_app
 
 
 def _secret_names(rows: list[dict]) -> list[str]:
@@ -52,7 +66,7 @@ def main() -> None:
     parser.add_argument(
         "--example-dir",
         default=str(pathlib.Path(__file__).resolve().parent),
-        help="Working directory containing app.py (default: this folder).",
+        help="Working directory containing 06-programmatic-secrets-redeploy.py (default: this folder).",
     )
     parser.add_argument(
         "--cleanup-app-secret-name",
@@ -61,6 +75,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    build_app = _load_build_app()
     example_dir = pathlib.Path(args.example_dir).resolve()
     phase1_env = example_dir / ".probe.phase1.env"
     phase2_env = example_dir / ".probe.phase2.env"

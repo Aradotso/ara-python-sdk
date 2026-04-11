@@ -109,7 +109,6 @@ ara logs app.py | tee app.logs
 - `ARA_API_KEY`: long-lived user API key for control plane
   - In the Ara app, open `Settings -> System`, then use **API Key -> Copy API Key**.
   - Paste that value into `ARA_API_KEY` before running SDK commands.
-  - Legacy `ARA_ACCESS_TOKEN` is still accepted as a compatibility fallback.
 - `ARA_API_BASE_URL`: optional API override (defaults to production API)
 - `ARA_RUNTIME_KEY`: optional runtime key override for `run/events`
 - `ARA_APP_HEADER_KEY`: optional app header key override (`X-Ara-App-Key`) for `run/events/run-async/run-status`
@@ -254,12 +253,14 @@ invoke.agent(
 
 See `examples/` for optional integrations and demo projects:
 
-- `examples/calcom-booking/`
-- `examples/async-ngrok-webhook/`
-- `examples/programmatic-secrets-redeploy/` (live probe for secret reconciliation + stable generated secret names)
-- `examples/agent-skills-loading/` (three minimal Ara SDK skill execution apps)
-- `examples/framework-adapters/minimal_langgraph_subagent.py` (legacy)
-- `examples/framework-adapters/minimal_agno_subagent.py` (legacy)
+- `examples/00-get-started.py` (smallest possible app)
+- `examples/01-a-agent-skills-loading.py`, `examples/01-b-agent-skills-loading.py`, `examples/01-c-agent-skills-loading.py`
+- `examples/02-canonical-email-chat-cron.py` (+ frontend assets in `examples/frontend/02-canonical-email-chat-cron/`)
+- `examples/03-async-ngrok-webhook.py` (+ helper scripts)
+- `examples/04-calcom-booking.py`
+- `examples/05-a-framework-adapters-langgraph.py`
+- `examples/05-b-framework-adapters-agno.py`
+- `examples/06-programmatic-secrets-redeploy.py` (live probe via `examples/06-programmatic-secrets-redeploy-test.py`)
 
 ## Security
 
