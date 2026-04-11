@@ -4,19 +4,24 @@ from __future__ import annotations
 
 import argparse
 import ast
-import getpass
+import base64
 import hashlib
+import http.server
 import inspect
 import json
 import logging
 import os
 import pathlib
 import re
+import secrets
+import sys
+import threading
 import textwrap
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, NoReturn, Optional
 from uuid import uuid4
@@ -30,6 +35,26 @@ DEFAULT_API_BASE_URL = "https://api.ara.so"
 CLI_CREDENTIALS_FILENAME = "credentials.json"
 CLI_CREDENTIALS_DIRNAME = ".ara"
 _JWT_REFRESH_SKEW_SECONDS = 30
+_CLI_OAUTH_CALLBACK_HOST = "127.0.0.1"
+_CLI_OAUTH_CALLBACK_PORT = 53682
+_CLI_OAUTH_CALLBACK_PORT_ENV = "ARA_CLI_OAUTH_PORT"
+_CLI_OAUTH_ALLOWED_PROVIDERS = frozenset(
+    {
+        "google",
+        "github",
+        "gitlab",
+        "azure",
+        "bitbucket",
+        "discord",
+        "facebook",
+        "linkedin_oidc",
+        "notion",
+        "slack",
+        "spotify",
+        "twitch",
+        "twitter",
+    }
+)
 ALLOWED_SANDBOX_POLICIES = frozenset({"shared", "dedicated", "ephemeral", "inherited"})
 MAGIC_NUMBER_SPAWN_DEFAULT_MAX_RECURSIVE_DEPTH = 1
 MAGIC_NUMBER_SPAWN_HARD_MAX_RECURSIVE_DEPTH = 5
@@ -1328,6 +1353,166 @@ def _supabase_token_request(
         raise RuntimeError(f"Supabase auth request failed ({exc.code}): {details}") from exc
 
 
+def _pkce_code_verifier() -> str:
+    # RFC 7636 allows 43-128 chars from unreserved URL charset.
+    return secrets.token_urlsafe(64)
+
+
+def _pkce_code_challenge(code_verifier: str) -> str:
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def _build_supabase_oauth_authorize_url(
+    *,
+    supabase_url: str,
+    provider: str,
+    redirect_to: str,
+    code_challenge: str,
+    state: str = "",
+) -> str:
+    params = {
+        "provider": provider,
+        "redirect_to": redirect_to,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "s256",
+    }
+    if state:
+        params["state"] = state
+    return f"{supabase_url.rstrip('/')}/auth/v1/authorize?{urllib.parse.urlencode(params)}"
+
+
+def _parse_oauth_callback_payload(raw: str) -> dict[str, str]:
+    text = str(raw or "").strip()
+    if not text:
+        return {}
+    parsed = urllib.parse.urlparse(text)
+    query_text = parsed.query if parsed.query else text
+    pairs = urllib.parse.parse_qs(query_text, keep_blank_values=True)
+    out: dict[str, str] = {}
+    for key in ("code", "state", "error", "error_description"):
+        value = pairs.get(key, [])
+        out[key] = str(value[0]).strip() if value else ""
+    return out
+
+
+def _collect_oauth_callback_via_localhost(
+    *,
+    supabase_url: str,
+    provider: str,
+    code_challenge: str,
+    expected_state: str,
+    timeout_seconds: int,
+    open_browser: bool,
+) -> dict[str, str]:
+    result: dict[str, str] = {}
+    result_lock = threading.Lock()
+
+    class _CallbackHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            parsed_path = urllib.parse.urlparse(self.path)
+            if parsed_path.path != "/auth/callback":
+                self.send_response(404)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"Not Found")
+                return
+
+            payload = _parse_oauth_callback_payload(self.path)
+            incoming_state = str(payload.get("state") or "").strip()
+            if incoming_state != expected_state:
+                self.send_response(400)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"State mismatch")
+                return
+            with result_lock:
+                for key in ("code", "state", "error", "error_description"):
+                    value = str(payload.get(key) or "").strip()
+                    if value and not str(result.get(key) or "").strip():
+                        result[key] = value
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            with result_lock:
+                has_code = bool(str(result.get("code") or "").strip())
+            if has_code:
+                message = "Ara CLI login succeeded. You can close this tab and return to the terminal."
+            else:
+                message = "Ara CLI login was not completed. Return to the terminal for details."
+            self.wfile.write(f"<html><body><p>{message}</p></body></html>".encode("utf-8"))
+
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
+            _ = (format, args)
+            return
+
+    requested_port_text = str(os.getenv(_CLI_OAUTH_CALLBACK_PORT_ENV, "")).strip()
+    requested_port = _CLI_OAUTH_CALLBACK_PORT
+    if requested_port_text:
+        try:
+            requested_port = int(requested_port_text)
+        except ValueError as exc:
+            raise RuntimeError(f"Invalid {_CLI_OAUTH_CALLBACK_PORT_ENV} value: {requested_port_text}") from exc
+    if not (1 <= requested_port <= 65535):
+        raise RuntimeError(
+            f"Invalid {_CLI_OAUTH_CALLBACK_PORT_ENV} value {requested_port}: must be 1-65535."
+        )
+
+    try:
+        server = http.server.ThreadingHTTPServer((_CLI_OAUTH_CALLBACK_HOST, requested_port), _CallbackHandler)
+    except OSError as exc:
+        raise RuntimeError(
+            f"Could not bind localhost callback server on {_CLI_OAUTH_CALLBACK_HOST}:{requested_port}. "
+            f"Free that port or set {_CLI_OAUTH_CALLBACK_PORT_ENV} to another allowed port."
+        ) from exc
+
+    with server:
+        server.timeout = 1
+        callback_port = int(server.server_address[1])
+        redirect_to = f"http://{_CLI_OAUTH_CALLBACK_HOST}:{callback_port}/auth/callback"
+        launch_url = _build_supabase_oauth_authorize_url(
+            supabase_url=supabase_url,
+            provider=provider,
+            redirect_to=redirect_to,
+            code_challenge=code_challenge,
+            state=expected_state,
+        )
+
+        print(f"Open this URL to sign in with {provider}:")
+        print(launch_url)
+        if open_browser:
+            try:
+                webbrowser.open(launch_url)
+            except Exception:
+                pass
+
+        deadline = time.time() + max(30, int(timeout_seconds or 180))
+        while time.time() <= deadline:
+            server.handle_request()
+            with result_lock:
+                has_terminal_result = bool(result.get("code") or result.get("error"))
+            if has_terminal_result:
+                break
+
+    with result_lock:
+        final = dict(result)
+
+    if final.get("error"):
+        detail = final.get("error_description") or final.get("error")
+        raise RuntimeError(f"OAuth login failed: {detail}")
+    if final.get("code"):
+        callback_state = str(final.get("state") or "").strip()
+        if callback_state != expected_state:
+            raise RuntimeError("OAuth callback state mismatch. Please retry `ara auth login`.")
+        final["redirect_uri"] = redirect_to
+        return final
+
+    raise RuntimeError(
+        "No localhost OAuth callback received before timeout. "
+        "Retry `ara auth login` or use `ara auth login --api-key <ARA_API_KEY>`."
+    )
+
+
 def _refresh_cli_jwt_credentials_if_needed(creds: dict[str, Any]) -> dict[str, Any]:
     auth_type = str(creds.get("auth_type") or "").strip().lower()
     if auth_type != "supabase_jwt":
@@ -2434,12 +2619,14 @@ def run_auth_cli(argv: Optional[list[str]] = None) -> None:
 
     p_login = sub.add_parser("login")
     p_login.add_argument("--api-base-url", default="")
-    p_login.add_argument("--email", default="")
     p_login.add_argument(
-        "--password",
+        "--api-key",
         default="",
-        help="Password for non-interactive/CI usage only. Avoid this flag in interactive terminals (visible in process lists/history).",
+        help="Store an existing ARA_API_KEY for CLI use (recommended for Google OAuth-only accounts).",
     )
+    p_login.add_argument("--provider", default="google")
+    p_login.add_argument("--timeout-seconds", type=int, default=180)
+    p_login.add_argument("--no-browser", action="store_true")
     p_login.add_argument("--supabase-url", default="")
     p_login.add_argument("--supabase-anon-key", default="")
 
@@ -2474,35 +2661,89 @@ def run_auth_cli(argv: Optional[list[str]] = None) -> None:
         return
 
     # login
+    provided_api_key = str(getattr(args, "api_key", "") or "").strip()
+    if provided_api_key:
+        _save_cli_credentials(
+            {
+                "auth_type": "cli_api_key",
+                "api_base_url": api_base_url,
+                "api_key": provided_api_key,
+            }
+        )
+        whoami: dict[str, Any] = {}
+        try:
+            whoami = _Http(api_base_url, provided_api_key).cli_whoami()
+        except RuntimeError:
+            print(
+                "Warning: could not verify API key against server; stored locally anyway.",
+                file=sys.stderr,
+            )
+            whoami = {"ok": True, "user": {"id": "", "email": ""}}
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "status": "logged_in",
+                    "auth_type": "cli_api_key",
+                    "api_base_url": api_base_url,
+                    "user": whoami.get("user"),
+                    "credentials_path": str(_cli_credentials_path()),
+                },
+                indent=2,
+            )
+        )
+        return
+
     direct_supabase_url = str(args.supabase_url or "").strip()
     direct_supabase_anon = str(args.supabase_anon_key or "").strip()
+    config_payload: dict[str, Any] = {}
     if direct_supabase_url and direct_supabase_anon:
         supabase_url = direct_supabase_url
         supabase_anon_key = direct_supabase_anon
     else:
-        cfg = _Http(api_base_url, "").cli_auth_config()
-        supabase_url = str(cfg.get("supabase_url") or "").strip()
-        supabase_anon_key = str(cfg.get("supabase_anon_key") or "").strip()
+        config_payload = _Http(api_base_url, "").cli_auth_config()
+        supabase_url = str(config_payload.get("supabase_url") or "").strip()
+        supabase_anon_key = str(config_payload.get("supabase_anon_key") or "").strip()
+        if not str(getattr(args, "api_base_url", "") or "").strip():
+            cfg_api_base = str(config_payload.get("api_base_url") or "").strip()
+            if cfg_api_base:
+                api_base_url = cfg_api_base
     if not (supabase_url and supabase_anon_key):
         raise SystemExit("ara auth: could not resolve Supabase auth config.")
 
-    email = str(args.email or "").strip()
-    if not email:
-        email = input("Ara email: ").strip()
-    if not email:
-        raise SystemExit("ara auth: email is required.")
-    password = str(args.password or "")
-    if not password:
-        password = getpass.getpass("Ara password: ")
-    if not password:
-        raise SystemExit("ara auth: password is required.")
+    provider = str(args.provider or "google").strip().lower() or "google"
+    if provider not in _CLI_OAUTH_ALLOWED_PROVIDERS:
+        allowed = ", ".join(sorted(_CLI_OAUTH_ALLOWED_PROVIDERS))
+        raise SystemExit(f"ara auth: unsupported OAuth provider '{provider}'. Allowed providers: {allowed}.")
+    code_verifier = _pkce_code_verifier()
+    code_challenge = _pkce_code_challenge(code_verifier)
+    expected_state = secrets.token_urlsafe(32)
+    try:
+        callback_payload = _collect_oauth_callback_via_localhost(
+            supabase_url=supabase_url,
+            provider=provider,
+            code_challenge=code_challenge,
+            expected_state=expected_state,
+            timeout_seconds=int(args.timeout_seconds or 180),
+            open_browser=not bool(args.no_browser),
+        )
+        auth_code = str(callback_payload.get("code") or "").strip()
+        redirect_uri = str(callback_payload.get("redirect_uri") or "").strip()
+        if not auth_code:
+            raise RuntimeError("OAuth callback did not include authorization code.")
+        issued = _supabase_token_request(
+            supabase_url=supabase_url,
+            supabase_anon_key=supabase_anon_key,
+            grant_type="pkce",
+            body={
+                "auth_code": auth_code,
+                "code_verifier": code_verifier,
+                "redirect_uri": redirect_uri,
+            },
+        )
+    except RuntimeError as exc:
+        raise SystemExit(f"ara auth: login failed ({exc})") from None
 
-    issued = _supabase_token_request(
-        supabase_url=supabase_url,
-        supabase_anon_key=supabase_anon_key,
-        grant_type="password",
-        body={"email": email, "password": password},
-    )
     access_token = str(issued.get("access_token") or "").strip()
     refresh_token = str(issued.get("refresh_token") or "").strip()
     if not access_token or not refresh_token:
@@ -2520,7 +2761,7 @@ def run_auth_cli(argv: Optional[list[str]] = None) -> None:
             "expires_at": expires_at,
             "user": {
                 "id": str(user_payload.get("id") or ""),
-                "email": str(user_payload.get("email") or email),
+                "email": str(user_payload.get("email") or ""),
             },
         }
     )
@@ -2532,7 +2773,7 @@ def run_auth_cli(argv: Optional[list[str]] = None) -> None:
             "ok": True,
             "user": {
                 "id": str(user_payload.get("id") or ""),
-                "email": str(user_payload.get("email") or email),
+                "email": str(user_payload.get("email") or ""),
             },
         }
     print(

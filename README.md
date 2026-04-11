@@ -108,6 +108,7 @@ ara logs app.py | tee app.logs
 
 - `ARA_API_KEY`: optional long-lived control-plane key
   - Preferred local workflow: `ara auth login` (stores JWT + refresh token in `~/.ara/credentials.json`).
+  - Google OAuth-only accounts can run `ara auth login --api-key <ARA_API_KEY>` to store an existing API key instead of using password login.
   - CI/headless workflows should continue to set `ARA_API_KEY`.
 - `ARA_API_BASE_URL`: optional API override (defaults to production API)
 - `ARA_RUNTIME_KEY`: optional runtime key override for `run/events`
@@ -119,8 +120,11 @@ Local bootstrap helper:
 
 - `ara auth login`:
   - fetches Supabase auth config from `/auth/cli/config`
-  - signs in with email/password against Supabase Auth
+  - opens browser OAuth login (Google by default) with PKCE and localhost callback
+  - exchanges callback auth code for Supabase access + refresh token
   - stores access + refresh token locally and auto-refreshes when needed
+  - default callback URL is `http://127.0.0.1:53682/auth/callback` (allowlist it in Supabase); set `ARA_CLI_OAUTH_PORT` to override
+  - alternative: `ara auth login --api-key <ARA_API_KEY>` stores an existing control-plane key locally (useful for Google OAuth-only users)
 - `ara setup-auth app.py`:
   - resolves `app_id` by app slug
   - ensures a runtime key exists (optional)

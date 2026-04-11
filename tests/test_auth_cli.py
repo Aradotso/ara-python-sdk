@@ -13,7 +13,7 @@ def _future_iso(minutes: int = 15) -> str:
     return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
 
 
-def test_auth_login_saves_supabase_jwt_credentials(monkeypatch, tmp_path):
+def test_auth_login_defaults_to_oauth_pkce(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
 
     def _fake_cli_auth_config(self):
@@ -22,43 +22,124 @@ def test_auth_login_saves_supabase_jwt_credentials(monkeypatch, tmp_path):
             "ok": True,
             "supabase_url": "https://try.ara.so",
             "supabase_anon_key": "anon_test",
+            "api_base_url": "https://api.ara.so",
+        }
+
+    def _fake_callback(**kwargs):
+        assert kwargs["provider"] == "google"
+        assert kwargs["open_browser"] is False
+        assert kwargs["supabase_url"] == "https://try.ara.so"
+        assert kwargs["expected_state"]
+        return {
+            "code": "oauth_code_1",
+            "state": kwargs["expected_state"],
+            "redirect_uri": "http://127.0.0.1:53682/auth/callback",
         }
 
     def _fake_supabase_token_request(**kwargs):
-        assert kwargs["grant_type"] == "password"
+        assert kwargs["grant_type"] == "pkce"
+        assert kwargs["body"]["auth_code"] == "oauth_code_1"
+        assert kwargs["body"]["code_verifier"]
+        assert kwargs["body"]["redirect_uri"] == "http://127.0.0.1:53682/auth/callback"
         return {
-            "access_token": "jwt_access_1",
-            "refresh_token": "refresh_1",
+            "access_token": "jwt_access_pkce",
+            "refresh_token": "refresh_pkce",
             "expires_in": 3600,
-            "user": {"id": "u_test", "email": "u@test.local"},
+            "user": {"id": "u_test", "email": "oauth@test.local"},
         }
 
     def _fake_whoami(self):
         _ = self
-        return {"ok": True, "user": {"id": "u_test", "email": "u@test.local"}}
+        return {"ok": True, "user": {"id": "u_test", "email": "oauth@test.local"}}
 
     monkeypatch.setattr(core._Http, "cli_auth_config", _fake_cli_auth_config)
+    monkeypatch.setattr(core, "_collect_oauth_callback_via_localhost", _fake_callback)
     monkeypatch.setattr(core, "_supabase_token_request", _fake_supabase_token_request)
     monkeypatch.setattr(core._Http, "cli_whoami", _fake_whoami)
 
     core.run_auth_cli(
         [
             "login",
-            "--api-base-url",
-            "https://api.ara.so",
-            "--email",
-            "u@test.local",
-            "--password",
-            "pw",
+            "--no-browser",
         ]
     )
 
     creds_path = tmp_path / ".ara" / "credentials.json"
     payload = json.loads(creds_path.read_text(encoding="utf-8"))
     assert payload["auth_type"] == "supabase_jwt"
-    assert payload["access_token"] == "jwt_access_1"
-    assert payload["refresh_token"] == "refresh_1"
+    assert payload["access_token"] == "jwt_access_pkce"
+    assert payload["refresh_token"] == "refresh_pkce"
     assert payload["api_base_url"] == "https://api.ara.so"
+
+
+def test_auth_login_with_api_key_saves_credentials(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def _fake_whoami(self):
+        _ = self
+        return {"ok": True, "user": {"id": "u_test", "email": "u@test.local"}}
+
+    monkeypatch.setattr(core._Http, "cli_whoami", _fake_whoami)
+    core.run_auth_cli(
+        [
+            "login",
+            "--api-base-url",
+            "https://api.ara.so",
+            "--api-key",
+            "ara_api_key_test_123",
+        ]
+    )
+
+    payload = json.loads((tmp_path / ".ara" / "credentials.json").read_text(encoding="utf-8"))
+    assert payload["auth_type"] == "cli_api_key"
+    assert payload["api_key"] == "ara_api_key_test_123"
+    assert payload["api_base_url"] == "https://api.ara.so"
+
+
+def test_auth_login_with_api_key_warns_when_unverified(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def _fake_whoami(self):
+        _ = self
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(core._Http, "cli_whoami", _fake_whoami)
+    core.run_auth_cli(
+        [
+            "login",
+            "--api-base-url",
+            "https://api.ara.so",
+            "--api-key",
+            "ara_api_key_test_123",
+        ]
+    )
+
+    err = capsys.readouterr().err
+    assert "could not verify API key against server" in err
+
+
+def test_auth_login_rejects_removed_password_flags():
+    with pytest.raises(SystemExit):
+        core.run_auth_cli(["login", "--email", "u@test.local", "--password", "pw"])
+
+
+def test_auth_login_rejects_unknown_provider(monkeypatch):
+    monkeypatch.delenv("ARA_API_BASE_URL", raising=False)
+    with pytest.raises(SystemExit, match=r"unsupported OAuth provider"):
+        core.run_auth_cli(["login", "--provider", "evil-provider"])
+
+
+def test_oauth_callback_port_env_requires_valid_range(monkeypatch):
+    monkeypatch.setenv("ARA_CLI_OAUTH_PORT", "70000")
+    with pytest.raises(RuntimeError, match=r"must be 1-65535"):
+        core._collect_oauth_callback_via_localhost(
+            supabase_url="https://try.ara.so",
+            provider="google",
+            code_challenge="challenge",
+            expected_state="expected",
+            timeout_seconds=30,
+            open_browser=False,
+        )
 
 
 def test_resolve_control_plane_bearer_refreshes_expired_cli_jwt(monkeypatch, tmp_path):
