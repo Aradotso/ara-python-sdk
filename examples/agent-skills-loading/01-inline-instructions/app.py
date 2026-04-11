@@ -10,7 +10,7 @@ for parent in pathlib.Path(__file__).resolve().parents:
         sys.path.insert(0, str(src_dir))
         break
 
-from ara_sdk import App, run_cli
+from ara_sdk import App
 
 AGENT_ID = "title-case-inline-instructions-agent"
 
@@ -66,6 +66,3 @@ def local(input_payload: dict[str, str]):
         "command_to_run": ARGV_COMMAND_TEMPLATE.format(quoted_text=shlex.quote(resolved_text)),
     }
 
-
-if __name__ == "__main__":
-    run_cli(app)

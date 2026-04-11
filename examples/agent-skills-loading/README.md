@@ -16,9 +16,7 @@ Each variant is a complete, minimal, single-file app (`app.py`).
 
 ```bash
 cd examples/agent-skills-loading/01-inline-instructions
-python3 app.py deploy
-python3 app.py setup-auth
-python3 app.py run --message "hello from ara sdk"
+ara local app.py --input text="hello from ara sdk"
 ```
 
 You can swap `01-inline-instructions` with:

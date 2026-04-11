@@ -17,7 +17,7 @@ pip install ara-sdk
 ## Quickstart
 
 ```python
-from ara_sdk import App, Secret, invoke, run_cli, runtime, schedule
+from ara_sdk import App, Secret, invoke, runtime, schedule
 import os
 
 app = App(
@@ -51,29 +51,35 @@ DAILY_FOLLOWUPS = schedule.cron(
 )
 def booking_coordinator():
     """Coordinate scheduling requests."""
-
-if __name__ == "__main__":
-    run_cli(app)
 ```
 
 ```bash
 export ARA_API_KEY="your_long_lived_api_key"
 export OPENAI_API_KEY="your_provider_key"
 
-python app.py deploy
-python app.py setup-auth
-python app.py run --agent booking-coordinator --message "Need 3 slots next week"
-python app.py run-async --agent booking-coordinator --message "Need 3 slots next week" --response-mode poll
-python app.py logs
-python app.py events --event-type channel.web.inbound --channel web --message "hello"
-python app.py setup
+ara deploy app.py
+ara setup-auth app.py
+ara run app.py --agent booking-coordinator --message "Need 3 slots next week"
+ara run-async app.py --agent booking-coordinator --message "Need 3 slots next week" --response-mode poll
+ara logs app.py
+ara events app.py --event-type channel.web.inbound --channel web --message "hello"
+ara setup app.py
 ```
 
-`python app.py logs` streams live runtime events for the app across all active runs.
+If you prefer embedded script commands (`python app.py deploy`), add:
+
+```python
+from ara_sdk import run_cli
+
+if __name__ == "__main__":
+    run_cli(app)
+```
+
+`ara logs app.py` streams live runtime events for the app across all active runs.
 Each line includes timestamp + run id + event type. To persist output, use shell piping:
 
 ```bash
-python app.py logs | tee app.logs
+ara logs app.py | tee app.logs
 ```
 
 ## Environment
@@ -85,12 +91,12 @@ python app.py logs | tee app.logs
 - `ARA_API_BASE_URL`: optional API override (defaults to production API)
 - `ARA_RUNTIME_KEY`: optional runtime key override for `run/events`
 - `ARA_APP_HEADER_KEY`: optional app header key override (`X-Ara-App-Key`) for `run/events/run-async/run-status`
-  - Prefer running `python app.py setup-auth` to mint/store an app header key in `.app-header-key.local`.
+  - Prefer running `ara setup-auth app.py` to mint/store an app header key in `.app-header-key.local`.
   - Set `ARA_APP_HEADER_KEY` only when overriding that generated key.
 
-Local bootstrap helpers:
+Local bootstrap helper:
 
-- `python app.py setup-auth`:
+- `ara setup-auth app.py`:
   - resolves `app_id` by app slug
   - ensures `.runtime-key.local` exists (optional)
   - creates `/apps/{app_id}/x-keys` key when missing
@@ -162,6 +168,7 @@ See `examples/` for optional integrations and demo projects:
 
 - `examples/calcom-booking/`
 - `examples/async-ngrok-webhook/`
+- `examples/programmatic-secrets-redeploy/` (live probe for secret reconciliation + stable generated secret names)
 - `examples/agent-skills-loading/` (three minimal Ara SDK skill execution apps)
 - `examples/framework-adapters/minimal_langgraph_subagent.py` (legacy)
 - `examples/framework-adapters/minimal_agno_subagent.py` (legacy)

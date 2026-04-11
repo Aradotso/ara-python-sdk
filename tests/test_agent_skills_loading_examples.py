@@ -29,7 +29,11 @@ def _run_app_json(
     merged_env = os.environ.copy()
     if env:
         merged_env.update(env)
-    command = [sys.executable, "app.py", *args]
+    if not args:
+        raise AssertionError("Expected at least one CLI command argument")
+    command = [sys.executable, "-m", "ara_sdk", args[0], "app.py", *args[1:]]
+    if args[0] == "local" and not (merged_env.get("ARA_API_KEY") or merged_env.get("ARA_ACCESS_TOKEN")):
+        merged_env["ARA_API_KEY"] = "local-demo-key"
     transient_markers = (
         "failed (500)",
         "failed (502)",

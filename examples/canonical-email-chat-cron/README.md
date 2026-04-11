@@ -38,14 +38,14 @@ Set at least:
 Deploy and create runtime setup:
 
 ```bash
-python3 app.py deploy
-python3 app.py setup
+ara deploy app.py
+ara setup app.py
 ```
 
 ## 2) Resolve runtime auth with SDK CLI
 
 ```bash
-python3 app.py setup-auth --ensure-runtime-key true
+ara setup-auth app.py --ensure-runtime-key true
 ```
 
 This keeps runtime key/bootstrap logic inside SDK CLI primitives.

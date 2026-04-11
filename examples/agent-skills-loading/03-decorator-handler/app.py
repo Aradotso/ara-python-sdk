@@ -9,7 +9,7 @@ for parent in pathlib.Path(__file__).resolve().parents:
         sys.path.insert(0, str(src_dir))
         break
 
-from ara_sdk import App, run_cli
+from ara_sdk import App
 
 AGENT_ID = "title-case-decorator-agent"
 TOOL_ID = "title_case_decorator"
@@ -83,6 +83,3 @@ def local(input_payload: dict[str, str]):
         return {"ok": False, "error": "Provide --input text='hello world'"}
     return title_case_decorator(text)
 
-
-if __name__ == "__main__":
-    run_cli(app)

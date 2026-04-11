@@ -10,7 +10,7 @@ for parent in pathlib.Path(__file__).resolve().parents:
         sys.path.insert(0, str(src_dir))
         break
 
-from ara_sdk import App, local_file, run_cli, runtime
+from ara_sdk import App, local_file, runtime
 
 AGENT_ID = "title-case-runtime-file-agent"
 PROJECT_NAME = "skill-script-v1"
@@ -93,6 +93,3 @@ def local(input_payload: dict[str, str]):
         "runtime_files": app.manifest.get("runtime_profile", {}).get("files", []),
     }
 
-
-if __name__ == "__main__":
-    run_cli(app)

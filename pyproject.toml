@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ara-sdk"
-version = "0.1.16"
+version = "0.1.17"
 description = "Public Python SDK for building and running Ara apps."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -36,6 +36,7 @@ Documentation = "https://docs.ara.so/sdk/overview"
 Issues = "https://github.com/Aradotso/ara-python-sdk/issues"
 
 [project.scripts]
+ara = "ara_sdk.__main__:main"
 ara-sdk = "ara_sdk.__main__:main"
 
 [tool.hatch.build]

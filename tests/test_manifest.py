@@ -1,4 +1,5 @@
 import io
+import os
 import urllib.error
 
 import pytest
@@ -801,12 +802,57 @@ def test_cli_setup_auth_dispatches_to_client(monkeypatch, capsys):
     assert '"app_id": "app_test_1"' in out
 
 
-def test_cli_rejects_removed_local_command():
-    with pytest.raises(SystemExit):
-        core.run_cli(
-            _manifest_with_runtime(runtime_profile={}),
-            argv=["local", "--input", "message=hello"],
-        )
+def test_cli_local_does_not_require_api_key(monkeypatch, capsys):
+    app = App(name="Local CLI App", project_name="local-cli-app")
+
+    @app.local_entrypoint()
+    def local(input_payload: dict[str, str]):
+        return {"echo": str(input_payload.get("text") or "")}
+
+    monkeypatch.delenv("ARA_API_KEY", raising=False)
+    monkeypatch.delenv("ARA_ACCESS_TOKEN", raising=False)
+
+    def _from_env_should_not_run(cls, *, manifest, cwd=None):  # noqa: ARG001
+        raise AssertionError("AraClient.from_env should not run for local command")
+
+    monkeypatch.setattr(
+        core.AraClient,
+        "from_env",
+        classmethod(_from_env_should_not_run),
+    )
+
+    core.run_cli(app, argv=["local", "--input", "text=hello-local"])
+    out = capsys.readouterr().out
+    assert '"ok": true' in out.lower()
+    assert '"echo": "hello-local"' in out
+
+
+def test_cli_local_loads_dotenv_without_api_key(monkeypatch, tmp_path, capsys):
+    app = App(name="Local CLI Env App", project_name="local-cli-env-app")
+
+    @app.local_entrypoint()
+    def local(_input_payload: dict[str, str]):
+        return {"local_env": str(os.getenv("LOCAL_ONLY_VALUE") or "")}
+
+    (tmp_path / ".env").write_text("LOCAL_ONLY_VALUE=from-dotenv\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LOCAL_ONLY_VALUE", raising=False)
+    monkeypatch.delenv("ARA_API_KEY", raising=False)
+    monkeypatch.delenv("ARA_ACCESS_TOKEN", raising=False)
+
+    def _from_env_should_not_run(cls, *, manifest, cwd=None):  # noqa: ARG001
+        raise AssertionError("AraClient.from_env should not run for local command")
+
+    monkeypatch.setattr(
+        core.AraClient,
+        "from_env",
+        classmethod(_from_env_should_not_run),
+    )
+
+    core.run_cli(app, argv=["local"])
+    out = capsys.readouterr().out
+    assert '"ok": true' in out.lower()
+    assert '"local_env": "from-dotenv"' in out
 
 
 def test_cli_logs_streams_runtime_lines(monkeypatch, capsys):

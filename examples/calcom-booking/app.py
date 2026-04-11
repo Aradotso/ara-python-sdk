@@ -1,4 +1,4 @@
-from ara_sdk import App, invoke, run_cli, sandbox, schedule
+from ara_sdk import App, invoke, sandbox, schedule
 
 app = App(
     "Meeting Booker",
@@ -25,6 +25,3 @@ app = App(
 def booking_coordinator():
     """Coordinate scheduling and booking actions."""
 
-
-if __name__ == "__main__":
-    run_cli(app)

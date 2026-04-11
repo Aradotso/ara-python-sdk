@@ -25,8 +25,9 @@ def _discover_app(module: ModuleType) -> App:
 
 
 def main() -> None:
+    bin_name = pathlib.Path(sys.argv[0]).name or "ara"
     if len(sys.argv) < 3:
-        raise SystemExit("Usage: ara-sdk <command> <app_script.py> [args...]")
+        raise SystemExit(f"Usage: {bin_name} <command> <app_script.py> [args...]")
     command = sys.argv[1]
     script = pathlib.Path(sys.argv[2]).expanduser().resolve()
     if not script.exists():

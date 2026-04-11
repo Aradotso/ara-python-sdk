@@ -7,7 +7,7 @@ import re
 import urllib.error
 import urllib.request
 
-from ara_sdk import App, Secret, run_cli, runtime
+from ara_sdk import App, Secret, runtime
 from dotenv import load_dotenv
 
 ROOT = pathlib.Path(__file__).resolve().parent
@@ -127,6 +127,3 @@ def local(input_payload):
         "chat_agent_id": CHAT_AGENT_ID,
     }
 
-
-if __name__ == "__main__":
-    run_cli(app)

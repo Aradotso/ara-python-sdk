@@ -1,4 +1,4 @@
-from ara_sdk import App, git_artifact, langgraph_adapter, run_cli, sandbox
+from ara_sdk import App, git_artifact, langgraph_adapter, sandbox
 
 app = App(
     "Framework Adapter Minimal (LangGraph)",
@@ -35,6 +35,3 @@ def local(input_payload: dict[str, str]):
         "message": input_payload.get("message", "hello from langgraph example"),
     }
 
-
-if __name__ == "__main__":
-    run_cli(app)

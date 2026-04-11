@@ -1,4 +1,4 @@
-from ara_sdk import App, agno_adapter, run_cli, sandbox, tarball_artifact
+from ara_sdk import App, agno_adapter, sandbox, tarball_artifact
 
 app = App(
     "Framework Adapter Minimal (Agno)",
@@ -38,6 +38,3 @@ def local(input_payload: dict[str, str]):
         "message": input_payload.get("message", "hello from agno example"),
     }
 
-
-if __name__ == "__main__":
-    run_cli(app)

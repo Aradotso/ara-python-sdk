@@ -21,8 +21,8 @@ This example shows both async channels in one flow:
 
 ```bash
 cd ara-python-sdk/examples/async-ngrok-webhook
-python3 app.py deploy
-python3 app.py setup-auth
+ara deploy app.py
+ara setup-auth app.py
 ```
 
 This writes local key files used by runtime calls:

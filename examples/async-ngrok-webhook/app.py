@@ -1,4 +1,4 @@
-from ara_sdk import App, run_cli, sandbox
+from ara_sdk import App, sandbox
 
 app = App(
     "Async Ngrok Webhook Demo",
@@ -15,6 +15,3 @@ app = App(
 def demo_agent(event=None):
     """Minimal workflow used for async run + callback demos."""
 
-
-if __name__ == "__main__":
-    run_cli(app)
