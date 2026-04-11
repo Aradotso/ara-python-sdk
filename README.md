@@ -40,8 +40,9 @@ app = App(
     ),
 )
 
-@app.tool(id="send_email", description="Send one email.")
+@app.tool(id="send_email")
 def send_email(to: str, subject: str, body: str) -> dict:
+    """Send one email."""
     return {"ok": True, "to": to, "subject": subject}
 
 DAILY_FOLLOWUPS = schedule.cron(
@@ -86,15 +87,6 @@ ara runtime tools execute --session sess-123 --tool exec --arg command="ls -la"
 ara runtime control actions --session sess-123
 ara runtime control call --session sess-123 --action list_windows
 ara runtime control call --session sess-123 --action launch_app --arg id=browser --arg url=https://mail.google.com
-```
-
-If you prefer embedded script commands (`python app.py deploy`), add:
-
-```python
-from ara_sdk import run_cli
-
-if __name__ == "__main__":
-    run_cli(app)
 ```
 
 `ara logs app.py` streams live runtime events for the app across all active runs.

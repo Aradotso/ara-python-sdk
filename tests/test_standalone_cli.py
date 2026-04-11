@@ -5,7 +5,7 @@ import pytest
 from ara_sdk import __main__ as sdk_main
 
 
-def test_standalone_cli_dispatches_command_to_run_cli(tmp_path, monkeypatch):
+def test_standalone_cli_dispatches_command_to_app_cli(tmp_path, monkeypatch):
     script = tmp_path / "app.py"
     script.write_text(
         "\n".join(
@@ -25,7 +25,7 @@ def test_standalone_cli_dispatches_command_to_run_cli(tmp_path, monkeypatch):
         captured["argv"] = list(argv or [])
         captured["default_command"] = default_command
 
-    monkeypatch.setattr(sdk_main, "run_cli", _run_cli)
+    monkeypatch.setattr(sdk_main, "_run_app_cli", _run_cli)
     monkeypatch.setattr(
         sdk_main.sys,
         "argv",

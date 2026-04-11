@@ -5,7 +5,7 @@ import pathlib
 import sys
 from types import ModuleType
 
-from .core import App, run_auth_cli, run_cli, run_runtime_cli
+from .core import _run_app_cli, App, run_auth_cli, run_runtime_cli
 
 
 def _print_help(bin_name: str) -> None:
@@ -77,7 +77,7 @@ def main() -> None:
         raise SystemExit(f"Script not found: {script}")
     module = _load_module(script)
     app = _discover_app(module)
-    run_cli(app, argv=[command, *sys.argv[3:]], default_command=command)
+    _run_app_cli(app, argv=[command, *sys.argv[3:]], default_command=command)
 
 
 if __name__ == "__main__":

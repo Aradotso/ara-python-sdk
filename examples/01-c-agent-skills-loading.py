@@ -20,9 +20,9 @@ app = App(
 
 @app.tool(
     id="title_case_decorator",
-    description="Convert input text by dispatching to the decorator-registered title-case handler.",
 )
 def title_case_decorator(text: str) -> dict:
+    """Convert input text by dispatching to the decorator-registered title-case handler."""
     # Keep registry + decorator local to the tool function because ara_sdk stores
     # and executes function source for runtime tools; module globals are not guaranteed.
     handlers: dict[str, callable] = {}

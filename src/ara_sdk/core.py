@@ -1009,7 +1009,6 @@ class App:
         self,
         *,
         id: Optional[str] = None,
-        description: str = "",
         parameters: Optional[dict[str, Any]] = None,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -1024,7 +1023,7 @@ class App:
             if not source.startswith("def "):
                 raise ValueError("@app.tool only supports standard def functions")
             params_schema = dict(parameters) if isinstance(parameters, dict) else _callable_parameters_schema(fn)
-            tool_description = str(description or fn.__doc__ or "").strip()
+            tool_description = str(fn.__doc__ or "").strip()
             item = {
                 "type": "function",
                 "function": {
@@ -2791,7 +2790,7 @@ def run_auth_cli(argv: Optional[list[str]] = None) -> None:
     )
 
 
-def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, default_command: str = "deploy") -> None:
+def _run_app_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, default_command: str = "deploy") -> None:
     app_obj = app if isinstance(app, App) else None
     manifest = app_obj.manifest if app_obj is not None else dict(app)
 
