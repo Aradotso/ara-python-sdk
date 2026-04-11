@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import argparse
 import ast
+import getpass
 import hashlib
 import inspect
 import json
+import logging
 import os
 import pathlib
 import re
 import textwrap
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, NoReturn, Optional
 from uuid import uuid4
 
@@ -24,6 +27,9 @@ DEFAULT_MAX_RETRIES = 2
 DEFAULT_RETRY_BACKOFF_SECONDS = 5
 DEBUG_HTTP_ERRORS_ENV = "ARA_SDK_DEBUG_HTTP_ERRORS"
 DEFAULT_API_BASE_URL = "https://api.ara.so"
+CLI_CREDENTIALS_FILENAME = "credentials.json"
+CLI_CREDENTIALS_DIRNAME = ".ara"
+_JWT_REFRESH_SKEW_SECONDS = 30
 ALLOWED_SANDBOX_POLICIES = frozenset({"shared", "dedicated", "ephemeral", "inherited"})
 MAGIC_NUMBER_SPAWN_DEFAULT_MAX_RECURSIVE_DEPTH = 1
 MAGIC_NUMBER_SPAWN_HARD_MAX_RECURSIVE_DEPTH = 5
@@ -37,6 +43,7 @@ ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 SECRET_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}[a-z0-9]$")
 RESERVED_ENV_KEYS = frozenset({"SESSION_ID", "USER_ID", "APP_ID"})
 RESERVED_ENV_PREFIXES = ("ARA_", "MODAL_")
+logger = logging.getLogger(__name__)
 
 
 def _slugify(value: str) -> str:
@@ -1210,6 +1217,174 @@ def _read_dotenv(path: pathlib.Path) -> None:
             os.environ[key] = value
 
 
+def _cli_credentials_path() -> pathlib.Path:
+    return pathlib.Path.home() / CLI_CREDENTIALS_DIRNAME / CLI_CREDENTIALS_FILENAME
+
+
+def _load_cli_credentials() -> dict[str, Any]:
+    path = _cli_credentials_path()
+    if not path.exists():
+        return {}
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.debug("Failed to load CLI credentials file: %s", path, exc_info=True)
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _save_cli_credentials(data: dict[str, Any]) -> None:
+    path = _cli_credentials_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        logger.debug("Failed to enforce 0700 on credentials directory: %s", path.parent, exc_info=True)
+    payload = dict(data or {})
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+    blob = json.dumps(payload, indent=2) + "\n"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(blob)
+
+
+def _clear_cli_credentials() -> None:
+    path = _cli_credentials_path()
+    if path.exists():
+        path.unlink()
+
+
+def _resolve_api_base_url(default: str = DEFAULT_API_BASE_URL) -> str:
+    env_url = os.getenv("ARA_API_BASE_URL", "").strip()
+    if env_url:
+        return env_url
+    creds = _load_cli_credentials()
+    saved_url = str(creds.get("api_base_url") or "").strip()
+    if saved_url:
+        return saved_url
+    return default
+
+
+def _coerce_supabase_expiry_iso(payload: dict[str, Any]) -> str:
+    raw_expires_at = payload.get("expires_at")
+    if isinstance(raw_expires_at, (int, float)):
+        return datetime.fromtimestamp(float(raw_expires_at), tz=timezone.utc).isoformat()
+    text = str(raw_expires_at or "").strip()
+    if text:
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.isoformat()
+        except ValueError:
+            pass
+    expires_in = int(payload.get("expires_in") or 0)
+    if expires_in > 0:
+        return (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
+    logger.warning("Supabase auth payload missing expiry metadata; refusing to cache JWT.", extra={"keys": sorted(payload.keys())})
+    raise RuntimeError("Supabase auth response did not include a valid expires_at or expires_in field.")
+
+
+def _parse_expiry_epoch(raw: Any) -> float:
+    text = str(raw or "").strip()
+    if not text:
+        return 0.0
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _supabase_token_request(
+    *,
+    supabase_url: str,
+    supabase_anon_key: str,
+    grant_type: str,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    url = f"{supabase_url.rstrip('/')}/auth/v1/token?grant_type={urllib.parse.quote(grant_type)}"
+    payload = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        method="POST",
+        data=payload,
+        headers={
+            "apikey": supabase_anon_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            raw = response.read().decode("utf-8")
+            parsed = json.loads(raw) if raw else {}
+            return parsed if isinstance(parsed, dict) else {}
+    except urllib.error.HTTPError as exc:
+        details = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Supabase auth request failed ({exc.code}): {details}") from exc
+
+
+def _refresh_cli_jwt_credentials_if_needed(creds: dict[str, Any]) -> dict[str, Any]:
+    auth_type = str(creds.get("auth_type") or "").strip().lower()
+    if auth_type != "supabase_jwt":
+        return creds
+    expires_epoch = _parse_expiry_epoch(creds.get("expires_at"))
+    if expires_epoch > (time.time() + _JWT_REFRESH_SKEW_SECONDS):
+        return creds
+    refresh_token = str(creds.get("refresh_token") or "").strip()
+    supabase_url = str(creds.get("supabase_url") or "").strip()
+    supabase_anon_key = str(creds.get("supabase_anon_key") or "").strip()
+    if not (refresh_token and supabase_url and supabase_anon_key):
+        raise RuntimeError("Stored CLI credentials are missing refresh metadata; run `ara auth login` again.")
+    refreshed = _supabase_token_request(
+        supabase_url=supabase_url,
+        supabase_anon_key=supabase_anon_key,
+        grant_type="refresh_token",
+        body={"refresh_token": refresh_token},
+    )
+    access_token = str(refreshed.get("access_token") or "").strip()
+    if not access_token:
+        raise RuntimeError("Supabase refresh did not return access_token")
+    updated = dict(creds)
+    updated["access_token"] = access_token
+    next_refresh = str(refreshed.get("refresh_token") or "").strip()
+    if next_refresh:
+        updated["refresh_token"] = next_refresh
+    updated["expires_at"] = _coerce_supabase_expiry_iso(refreshed)
+    user = refreshed.get("user")
+    if isinstance(user, dict):
+        updated["user"] = {
+            "id": str(user.get("id") or ""),
+            "email": str(user.get("email") or ""),
+        }
+    _save_cli_credentials(updated)
+    return updated
+
+
+def _resolve_control_plane_bearer() -> str:
+    env_key = os.getenv("ARA_API_KEY", "").strip()
+    if env_key:
+        return env_key
+    legacy = os.getenv("ARA_ACCESS_TOKEN", "").strip()
+    if legacy:
+        return legacy
+    creds = _load_cli_credentials()
+    if not creds:
+        return ""
+    auth_type = str(creds.get("auth_type") or "").strip().lower()
+    if auth_type == "supabase_jwt":
+        refreshed = _refresh_cli_jwt_credentials_if_needed(creds)
+        return str(refreshed.get("access_token") or "").strip()
+    saved_api_key = str(creds.get("api_key") or "").strip()
+    if saved_api_key:
+        return saved_api_key
+    return ""
+
+
 class _Http:
     def __init__(self, base_url: str, api_key: str):
         self.base_url = base_url.rstrip("/")
@@ -1506,6 +1681,12 @@ class _Http:
             body={"email": email, "role": role, "expires_in_hours": int(expires_in_hours)},
         )
 
+    def cli_auth_config(self) -> dict[str, Any]:
+        return self._request("/auth/cli/config", method="GET", auth_header="")
+
+    def cli_whoami(self) -> dict[str, Any]:
+        return self._request("/auth/cli/whoami", method="GET")
+
 
 class AraClient:
     """Runtime client bound to one App manifest."""
@@ -1519,14 +1700,14 @@ class AraClient:
     def from_env(cls, *, manifest: dict[str, Any], cwd: Optional[str] = None) -> "AraClient":
         base = pathlib.Path(cwd or os.getcwd())
         _read_dotenv(base / ".env")
-        if not os.getenv("ARA_API_BASE_URL", "").strip():
-            os.environ["ARA_API_BASE_URL"] = DEFAULT_API_BASE_URL
-        api_key = os.getenv("ARA_API_KEY", "").strip()
+        api_base_url = _resolve_api_base_url(DEFAULT_API_BASE_URL).strip() or DEFAULT_API_BASE_URL
+        os.environ["ARA_API_BASE_URL"] = api_base_url
+        api_key = _resolve_control_plane_bearer()
         if not api_key:
-            raise RuntimeError("Missing required env var: ARA_API_KEY.")
+            raise RuntimeError("No credentials found. Set ARA_API_KEY or run `ara auth login`.")
         return cls(
             manifest=manifest,
-            api_base_url=os.getenv("ARA_API_BASE_URL", DEFAULT_API_BASE_URL).strip() or DEFAULT_API_BASE_URL,
+            api_base_url=api_base_url,
             api_key=api_key,
             cwd=base,
         )
@@ -1914,13 +2095,13 @@ class AraRuntimeClient:
     def from_env(cls, *, cwd: Optional[str] = None) -> "AraRuntimeClient":
         base = pathlib.Path(cwd or os.getcwd())
         _read_dotenv(base / ".env")
-        if not os.getenv("ARA_API_BASE_URL", "").strip():
-            os.environ["ARA_API_BASE_URL"] = DEFAULT_API_BASE_URL
-        api_key = os.getenv("ARA_API_KEY", "").strip()
+        api_base_url = _resolve_api_base_url(DEFAULT_API_BASE_URL).strip() or DEFAULT_API_BASE_URL
+        os.environ["ARA_API_BASE_URL"] = api_base_url
+        api_key = _resolve_control_plane_bearer()
         if not api_key:
-            raise RuntimeError("Missing required env var: ARA_API_KEY.")
+            raise RuntimeError("No credentials found. Set ARA_API_KEY or run `ara auth login`.")
         return cls(
-            api_base_url=os.getenv("ARA_API_BASE_URL", DEFAULT_API_BASE_URL).strip() or DEFAULT_API_BASE_URL,
+            api_base_url=api_base_url,
             api_key=api_key,
             cwd=base,
         )
@@ -2245,6 +2426,128 @@ def run_runtime_cli(argv: Optional[list[str]] = None) -> None:
         return
 
     parser.print_help()
+
+
+def run_auth_cli(argv: Optional[list[str]] = None) -> None:
+    parser = argparse.ArgumentParser(description="Ara auth CLI")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_login = sub.add_parser("login")
+    p_login.add_argument("--api-base-url", default="")
+    p_login.add_argument("--email", default="")
+    p_login.add_argument(
+        "--password",
+        default="",
+        help="Password for non-interactive/CI usage only. Avoid this flag in interactive terminals (visible in process lists/history).",
+    )
+    p_login.add_argument("--supabase-url", default="")
+    p_login.add_argument("--supabase-anon-key", default="")
+
+    p_whoami = sub.add_parser("whoami")
+    p_whoami.add_argument("--api-base-url", default="")
+
+    sub.add_parser("logout")
+
+    args = parser.parse_args(argv)
+    command = str(args.command or "").strip().lower()
+
+    if command == "logout":
+        _clear_cli_credentials()
+        print(json.dumps({"ok": True, "status": "logged_out"}, indent=2))
+        return
+
+    api_base_url = str(getattr(args, "api_base_url", "") or "").strip() or _resolve_api_base_url(DEFAULT_API_BASE_URL)
+
+    if command == "whoami":
+        bearer = _resolve_control_plane_bearer()
+        if not bearer:
+            raise SystemExit("ara auth: not logged in. Run `ara auth login` or set ARA_API_KEY.")
+        out = _Http(api_base_url, bearer).cli_whoami()
+        if os.getenv("ARA_API_KEY", "").strip() or os.getenv("ARA_ACCESS_TOKEN", "").strip():
+            source = "env"
+        else:
+            creds = _load_cli_credentials()
+            auth_type = str(creds.get("auth_type") or "").strip()
+            source = auth_type or ("cli_api_key" if str(creds.get("api_key") or "").strip() else "cli_jwt")
+        out["auth_source"] = source
+        print(json.dumps(out, indent=2))
+        return
+
+    # login
+    direct_supabase_url = str(args.supabase_url or "").strip()
+    direct_supabase_anon = str(args.supabase_anon_key or "").strip()
+    if direct_supabase_url and direct_supabase_anon:
+        supabase_url = direct_supabase_url
+        supabase_anon_key = direct_supabase_anon
+    else:
+        cfg = _Http(api_base_url, "").cli_auth_config()
+        supabase_url = str(cfg.get("supabase_url") or "").strip()
+        supabase_anon_key = str(cfg.get("supabase_anon_key") or "").strip()
+    if not (supabase_url and supabase_anon_key):
+        raise SystemExit("ara auth: could not resolve Supabase auth config.")
+
+    email = str(args.email or "").strip()
+    if not email:
+        email = input("Ara email: ").strip()
+    if not email:
+        raise SystemExit("ara auth: email is required.")
+    password = str(args.password or "")
+    if not password:
+        password = getpass.getpass("Ara password: ")
+    if not password:
+        raise SystemExit("ara auth: password is required.")
+
+    issued = _supabase_token_request(
+        supabase_url=supabase_url,
+        supabase_anon_key=supabase_anon_key,
+        grant_type="password",
+        body={"email": email, "password": password},
+    )
+    access_token = str(issued.get("access_token") or "").strip()
+    refresh_token = str(issued.get("refresh_token") or "").strip()
+    if not access_token or not refresh_token:
+        raise SystemExit("ara auth: login failed, missing access or refresh token.")
+    expires_at = _coerce_supabase_expiry_iso(issued)
+    user_payload = issued.get("user") if isinstance(issued.get("user"), dict) else {}
+    _save_cli_credentials(
+        {
+            "auth_type": "supabase_jwt",
+            "api_base_url": api_base_url,
+            "supabase_url": supabase_url,
+            "supabase_anon_key": supabase_anon_key,
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "expires_at": expires_at,
+            "user": {
+                "id": str(user_payload.get("id") or ""),
+                "email": str(user_payload.get("email") or email),
+            },
+        }
+    )
+    whoami: dict[str, Any] = {}
+    try:
+        whoami = _Http(api_base_url, access_token).cli_whoami()
+    except RuntimeError:
+        whoami = {
+            "ok": True,
+            "user": {
+                "id": str(user_payload.get("id") or ""),
+                "email": str(user_payload.get("email") or email),
+            },
+        }
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "status": "logged_in",
+                "api_base_url": api_base_url,
+                "expires_at": expires_at,
+                "user": whoami.get("user"),
+                "credentials_path": str(_cli_credentials_path()),
+            },
+            indent=2,
+        )
+    )
 
 
 def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, default_command: str = "deploy") -> None:

@@ -63,7 +63,7 @@ def booking_coordinator():
 ```
 
 ```bash
-export ARA_API_KEY="your_long_lived_api_key"
+ara auth login
 export OPENAI_API_KEY="your_provider_key"
 
 ara deploy app.py
@@ -106,9 +106,9 @@ ara logs app.py | tee app.logs
 
 ## Environment
 
-- `ARA_API_KEY`: long-lived user API key for control plane
-  - In the Ara app, open `Settings -> System`, then use **API Key -> Copy API Key**.
-  - Paste that value into `ARA_API_KEY` before running SDK commands.
+- `ARA_API_KEY`: optional long-lived control-plane key
+  - Preferred local workflow: `ara auth login` (stores JWT + refresh token in `~/.ara/credentials.json`).
+  - CI/headless workflows should continue to set `ARA_API_KEY`.
 - `ARA_API_BASE_URL`: optional API override (defaults to production API)
 - `ARA_RUNTIME_KEY`: optional runtime key override for `run/events`
 - `ARA_APP_HEADER_KEY`: optional app header key override (`X-Ara-App-Key`) for `run/events/run-async/run-status`
@@ -117,6 +117,10 @@ ara logs app.py | tee app.logs
 
 Local bootstrap helper:
 
+- `ara auth login`:
+  - fetches Supabase auth config from `/auth/cli/config`
+  - signs in with email/password against Supabase Auth
+  - stores access + refresh token locally and auto-refreshes when needed
 - `ara setup-auth app.py`:
   - resolves `app_id` by app slug
   - ensures a runtime key exists (optional)

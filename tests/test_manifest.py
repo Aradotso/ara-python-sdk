@@ -295,7 +295,7 @@ def test_from_env_uses_api_key(monkeypatch, tmp_path):
 def test_from_env_requires_api_key(monkeypatch, tmp_path):
     monkeypatch.setenv("ARA_API_BASE_URL", "https://api.ara.so")
     monkeypatch.delenv("ARA_API_KEY", raising=False)
-    with pytest.raises(RuntimeError, match="Missing required env var: ARA_API_KEY."):
+    with pytest.raises(RuntimeError, match=r"No credentials found\. Set ARA_API_KEY or run `ara auth login`\.$"):
         core.AraClient.from_env(manifest=_manifest_with_runtime(runtime_profile={}), cwd=str(tmp_path))
 
 
