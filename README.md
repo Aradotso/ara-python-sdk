@@ -18,15 +18,15 @@ pip install ara-sdk
 
 ```python
 from ara_sdk import App, Secret, invoke, run_cli, runtime, schedule
+import os
 
 app = App(
     "Investor Meeting Booker",
     project_name="investor-meeting-booking",
     runtime_profile=runtime(
-        env={"APP_MODE": "production"},
         secrets=[
-            Secret.from_name("provider-shared", required_keys=["OPENAI_API_KEY"]),
-            Secret.from_local_environ("provider-local", env_keys=["OPENAI_API_KEY"]),
+            Secret.from_dotenv(),
+            Secret.from_dict({"OPENAI_API_KEY": os.environ["OPENAI_API_KEY"]}),
         ],
     ),
 )
@@ -106,13 +106,16 @@ Local bootstrap helpers:
 Secret helper options:
 
 - `Secret.from_name(name, required_keys=None)` (reference only)
-- `Secret.from_dict(name, env_dict)` (synced at deploy)
-- `Secret.from_dotenv(name, filename=".env")` (synced at deploy)
+- `Secret.from_dict(name_or_env_dict, env_dict=None, *, required_keys=None, name=None)`:
+  - `Secret.from_dict("provider-local", {...})` for explicit naming
+  - `Secret.from_dict({...})` (or `Secret.from_dict({...}, name="provider-local")`) for programmatic local secrets
+- `Secret.from_dotenv(name=None, filename=".env")` (auto-named when name omitted)
 - `Secret.from_local_environ(name, env_keys=[...])` (synced at deploy)
 
 Deploy behavior:
 
 - Local secret sources sync to `/apps/{app_id}/secrets` before warmup.
+- When `runtime(secrets=[...])` is present, deploy reconciles the remote app secret set to match those refs (stale secrets are removed).
 - Secret references remain in manifest; plaintext values are not embedded in app manifest payloads.
 
 ## Multi-sandbox proposal shape

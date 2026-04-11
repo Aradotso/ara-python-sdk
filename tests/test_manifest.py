@@ -291,9 +291,23 @@ def test_secret_rejects_reserved_keys():
 def test_secret_from_dotenv_and_local_environ(tmp_path, monkeypatch):
     dotenv = tmp_path / ".env.secrets"
     dotenv.write_text("OPENAI_API_KEY=sk-123\nANTHROPIC_API_KEY=an-123\n", encoding="utf-8")
+    auto_secret = Secret.from_dotenv(filename=str(dotenv))
+    assert auto_secret.name.startswith("sdk-dotenv-")
+    assert auto_secret.values == {"OPENAI_API_KEY": "sk-123", "ANTHROPIC_API_KEY": "an-123"}
+    dotenv_rotated = tmp_path / ".env.secrets.rotated"
+    dotenv_rotated.write_text("OPENAI_API_KEY=sk-456\nANTHROPIC_API_KEY=an-789\n", encoding="utf-8")
+    assert Secret.from_dotenv(filename=str(dotenv_rotated)).name == auto_secret.name
+
     secret = Secret.from_dotenv("provider-local", filename=str(dotenv))
     assert secret.name == "provider-local"
     assert secret.values == {"OPENAI_API_KEY": "sk-123", "ANTHROPIC_API_KEY": "an-123"}
+
+    dict_secret = Secret.from_dict({"FOO": "bar"})
+    assert dict_secret.name.startswith("sdk-dict-")
+    assert Secret.from_dict({"FOO": "bar"}).name == dict_secret.name
+    assert Secret.from_dict({"FOO": "baz"}).name == dict_secret.name
+    with pytest.raises(ValueError, match="conflicts with name= keyword"):
+        Secret.from_dict("provider-local", {"FOO": "bar"}, name="provider-other")
 
     monkeypatch.setenv("CAL_API_KEY", "cal-123")
     env_secret = Secret.from_local_environ("calendar", env_keys=["CAL_API_KEY"])
@@ -312,6 +326,7 @@ class _FakeHttp:
     def __init__(self):
         self.calls: list[str] = []
         self.created_payload: dict | None = None
+        self.secret_rows: list[dict[str, object]] = []
 
     def list_apps(self) -> dict:
         self.calls.append("list_apps")
@@ -329,7 +344,25 @@ class _FakeHttp:
     def upsert_secret(self, app_id: str, *, name: str, values: dict[str, str]) -> dict:
         _ = app_id
         self.calls.append(f"upsert_secret:{name}")
+        found = False
+        for row in self.secret_rows:
+            if str(row.get("name") or "") == name:
+                row["key_names"] = sorted(values.keys())
+                found = True
+                break
+        if not found:
+            self.secret_rows.append({"name": name, "key_names": sorted(values.keys())})
         return {"secret": {"name": name, "key_names": sorted(values.keys())}}
+
+    def list_secrets(self, app_id: str) -> dict:
+        _ = app_id
+        self.calls.append("list_secrets")
+        return {"secrets": [dict(row) for row in self.secret_rows]}
+
+    def delete_secret(self, app_id: str, name: str) -> None:
+        _ = app_id
+        self.calls.append(f"delete_secret:{name}")
+        self.secret_rows = [row for row in self.secret_rows if str(row.get("name") or "") != name]
 
     def create_key(self, app_id: str, *, name: str, requests_per_minute: int) -> dict:
         _ = (app_id, name, requests_per_minute)
@@ -492,6 +525,39 @@ def test_deploy_surfaces_backend_secrets_route_compat_error(tmp_path):
         client.deploy()
 
 
+def test_deploy_ignores_delete_404_for_concurrent_secret_reconciliation(tmp_path):
+    local_secret = Secret.from_dict({"OPENAI_API_KEY": "sk-local"})
+    client = core.AraClient(
+        manifest=_manifest_with_runtime(runtime_profile=runtime(secrets=[local_secret])),
+        api_base_url="https://api.ara.so",
+        api_key="token",
+        cwd=tmp_path,
+    )
+
+    class _CompatDeleteHttp(_FakeHttp):
+        def list_apps(self) -> dict:
+            self.calls.append("list_apps")
+            return {"apps": [{"id": "app_existing_1", "slug": "test-app", "role": "owner"}]}
+
+        def delete_secret(self, app_id: str, name: str) -> None:
+            _ = (app_id, name)
+            raise RuntimeError(
+                "DELETE /apps/app_existing_1/secrets/stale-secret failed (404). "
+                "Response body hidden by default; set ARA_SDK_DEBUG_HTTP_ERRORS=true to include it."
+            )
+
+    fake_http = _CompatDeleteHttp()
+    fake_http.secret_rows = [
+        {"name": local_secret.name, "key_names": ["OPENAI_API_KEY"]},
+        {"name": "stale-secret", "key_names": ["OLD_KEY"]},
+    ]
+    client.http = fake_http
+
+    out = client.deploy()
+    assert out["app_id"] == "app_existing_1"
+    assert "delete_secret:stale-secret" not in fake_http.calls
+
+
 def test_deploy_defaults_to_update_when_app_exists(tmp_path):
     client = core.AraClient(
         manifest=_manifest_with_runtime(runtime_profile={}),
@@ -513,6 +579,57 @@ def test_deploy_defaults_to_update_when_app_exists(tmp_path):
     assert out["app_id"] == "app_existing_1"
     assert "create_app" not in fake_http.calls
     assert "update_app" in fake_http.calls
+
+
+def test_deploy_reconciles_app_secrets_to_runtime_refs(tmp_path):
+    local_secret = Secret.from_dict({"OPENAI_API_KEY": "sk-local"})
+    client = core.AraClient(
+        manifest=_manifest_with_runtime(runtime_profile=runtime(secrets=[local_secret])),
+        api_base_url="https://api.ara.so",
+        api_key="token",
+        cwd=tmp_path,
+    )
+
+    class _ExistingHttp(_FakeHttp):
+        def list_apps(self) -> dict:
+            self.calls.append("list_apps")
+            return {"apps": [{"id": "app_existing_1", "slug": "test-app", "role": "owner"}]}
+
+    fake_http = _ExistingHttp()
+    fake_http.secret_rows = [
+        {"name": "stale-secret", "key_names": ["OLD_KEY"]},
+        {"name": local_secret.name, "key_names": ["OPENAI_API_KEY"]},
+    ]
+    client.http = fake_http
+
+    _ = client.deploy()
+
+    assert "list_secrets" in fake_http.calls
+    assert "delete_secret:stale-secret" in fake_http.calls
+    assert f"delete_secret:{local_secret.name}" not in fake_http.calls
+
+
+def test_deploy_without_runtime_secrets_does_not_reconcile_app_secrets(tmp_path):
+    client = core.AraClient(
+        manifest=_manifest_with_runtime(runtime_profile={}),
+        api_base_url="https://api.ara.so",
+        api_key="token",
+        cwd=tmp_path,
+    )
+
+    class _ExistingHttp(_FakeHttp):
+        def list_apps(self) -> dict:
+            self.calls.append("list_apps")
+            return {"apps": [{"id": "app_existing_1", "slug": "test-app", "role": "owner"}]}
+
+    fake_http = _ExistingHttp()
+    fake_http.secret_rows = [{"name": "stale-secret", "key_names": ["OLD_KEY"]}]
+    client.http = fake_http
+
+    _ = client.deploy()
+
+    assert "list_secrets" not in fake_http.calls
+    assert all(not call.startswith("delete_secret:") for call in fake_http.calls)
 
 
 def test_setup_auth_creates_and_persists_app_header_key(tmp_path):

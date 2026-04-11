@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import inspect
 import json
 import os
@@ -13,7 +14,7 @@ import textwrap
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Callable, NoReturn, Optional
 from uuid import uuid4
 
 DEFAULT_SUBAGENT_MAX_CONCURRENCY = 8
@@ -77,6 +78,15 @@ def _validate_env_key(key: str) -> str:
     if normalized in RESERVED_ENV_KEYS or any(normalized.startswith(prefix) for prefix in RESERVED_ENV_PREFIXES):
         raise ValueError(f"Reserved environment key is not allowed: {normalized}")
     return normalized
+
+
+def _stable_secret_suffix(values: dict[str, str]) -> str:
+    key_fingerprint = json.dumps(sorted(values.keys()), separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(key_fingerprint.encode("utf-8")).hexdigest()[:12]
+
+
+def _generated_secret_name(prefix: str, values: dict[str, str]) -> str:
+    return _normalize_secret_name(f"sdk-{prefix}-{_stable_secret_suffix(values)}")
 
 
 def _normalize_required_keys(required_keys: Optional[list[str]]) -> list[str]:
@@ -196,15 +206,34 @@ class SecretDefinition:
     @classmethod
     def from_dict(
         cls,
-        name: str,
-        env_dict: dict[str, Any],
+        name_or_env_dict: str | dict[str, Any],
+        env_dict: Optional[dict[str, Any]] = None,
         *,
         required_keys: Optional[list[str]] = None,
+        name: Optional[str] = None,
     ) -> "SecretDefinition":
-        if not isinstance(env_dict, dict) or not env_dict:
-            raise ValueError("from_dict requires a non-empty env_dict")
+        if isinstance(name_or_env_dict, dict):
+            if env_dict is not None:
+                raise ValueError("from_dict(dict, ...) does not accept a second env_dict argument")
+            values = {str(k): "" if v is None else str(v) for k, v in name_or_env_dict.items()}
+            if not values:
+                raise ValueError("from_dict requires a non-empty env_dict")
+            resolved_name = _normalize_secret_name(name) if name is not None else _generated_secret_name("dict", values)
+            return cls(
+                resolved_name,
+                values=values,
+                required_keys=required_keys,
+                source="dict",
+            )
+        if not isinstance(name_or_env_dict, str) or not isinstance(env_dict, dict) or not env_dict:
+            raise ValueError("from_dict requires either (name, env_dict) or (env_dict)")
+        if name is not None:
+            positional_name = _normalize_secret_name(name_or_env_dict)
+            keyword_name = _normalize_secret_name(name)
+            if positional_name != keyword_name:
+                raise ValueError("from_dict positional name conflicts with name= keyword")
         return cls(
-            name,
+            name_or_env_dict,
             values={str(k): "" if v is None else str(v) for k, v in env_dict.items()},
             required_keys=required_keys,
             source="dict",
@@ -213,7 +242,7 @@ class SecretDefinition:
     @classmethod
     def from_dotenv(
         cls,
-        name: str,
+        name: Optional[str] = None,
         filename: str = ".env",
         *,
         required_keys: Optional[list[str]] = None,
@@ -235,7 +264,8 @@ class SecretDefinition:
                 values[key] = value
         if not values:
             raise ValueError(f"Secret dotenv file has no key=value entries: {dotenv_path}")
-        return cls(name, values=values, required_keys=required_keys, source="dotenv")
+        resolved_name = _normalize_secret_name(name) if name is not None else _generated_secret_name("dotenv", values)
+        return cls(resolved_name, values=values, required_keys=required_keys, source="dotenv")
 
     @classmethod
     def from_local_environ(
@@ -274,16 +304,22 @@ class Secret:
 
     @staticmethod
     def from_dict(
-        name: str,
-        env_dict: dict[str, Any],
+        name_or_env_dict: str | dict[str, Any],
+        env_dict: Optional[dict[str, Any]] = None,
         *,
         required_keys: Optional[list[str]] = None,
+        name: Optional[str] = None,
     ) -> SecretDefinition:
-        return SecretDefinition.from_dict(name, env_dict, required_keys=required_keys)
+        return SecretDefinition.from_dict(
+            name_or_env_dict,
+            env_dict,
+            required_keys=required_keys,
+            name=name,
+        )
 
     @staticmethod
     def from_dotenv(
-        name: str,
+        name: Optional[str] = None,
         filename: str = ".env",
         *,
         required_keys: Optional[list[str]] = None,
@@ -1209,6 +1245,15 @@ class _Http:
             body={"name": name, "values": values},
         )
 
+    def list_secrets(self, app_id: str) -> dict[str, Any]:
+        return self._request(f"/apps/{app_id}/secrets")
+
+    def delete_secret(self, app_id: str, name: str) -> None:
+        _ = self._request(
+            f"/apps/{app_id}/secrets/{name}",
+            method="DELETE",
+        )
+
     def run_app(
         self,
         app_id: str,
@@ -1486,25 +1531,55 @@ class AraClient:
     def _extract_secret_sync_plan(self, runtime_profile: dict[str, Any]) -> list[SecretDefinition]:
         return _collect_runtime_secret_definitions(runtime_profile)
 
-    def _sync_secret_definitions(self, app_id: str, definitions: list[SecretDefinition]) -> dict[str, Any]:
+    def _sync_secret_definitions(
+        self,
+        app_id: str,
+        definitions: list[SecretDefinition],
+        *,
+        reconcile_runtime_secrets: bool,
+    ) -> dict[str, Any]:
+        def _raise_secrets_route_compat_error(exc: RuntimeError) -> NoReturn:
+            message = str(exc)
+            if f"/apps/{app_id}/secrets failed (404)" in message:
+                raise RuntimeError(
+                    "Secret sync failed because this backend does not support "
+                    "App SDK secret routes yet. Upgrade backend to a version "
+                    f"with /apps/{app_id}/secrets support, or remove runtime(secrets=...) declarations."
+                ) from exc
+            raise exc
+
         synced: list[str] = []
         referenced_only: list[str] = []
+        desired_names: set[str] = set()
         for definition in definitions:
+            desired_names.add(definition.name)
             if definition.values is None:
                 referenced_only.append(definition.name)
                 continue
             try:
                 self.http.upsert_secret(app_id, name=definition.name, values=definition.values)
             except RuntimeError as exc:
-                message = str(exc)
-                if f"/apps/{app_id}/secrets failed (404)" in message:
-                    raise RuntimeError(
-                        "Secret sync failed because this backend does not support "
-                        "App SDK secret routes yet. Upgrade backend to a version "
-                        f"with /apps/{app_id}/secrets support, or remove runtime(secrets=...) declarations."
-                    ) from exc
-                raise
+                _raise_secrets_route_compat_error(exc)
             synced.append(definition.name)
+        if reconcile_runtime_secrets:
+            try:
+                existing_rows = self.http.list_secrets(app_id).get("secrets") or []
+            except RuntimeError as exc:
+                _raise_secrets_route_compat_error(exc)
+            for row in existing_rows:
+                if not isinstance(row, dict):
+                    continue
+                existing_name = str(row.get("name") or "").strip().lower()
+                if not existing_name or existing_name in desired_names:
+                    continue
+                try:
+                    self.http.delete_secret(app_id, existing_name)
+                except RuntimeError as exc:
+                    # Idempotent reconciliation: concurrent deploys may have already
+                    # deleted this stale secret.
+                    if f"/apps/{app_id}/secrets/{existing_name} failed (404)" in str(exc):
+                        continue
+                    _raise_secrets_route_compat_error(exc)
         return {"synced": synced, "referenced_only": referenced_only}
 
     def deploy(
@@ -1530,6 +1605,7 @@ class AraClient:
             )
 
         runtime_profile = dict(self.manifest.get("runtime_profile") or {})
+        reconcile_runtime_secrets = "secret_refs" in runtime_profile
         secret_definitions = self._extract_secret_sync_plan(runtime_profile)
         runtime_profile.pop("__secret_definitions", None)
 
@@ -1554,7 +1630,11 @@ class AraClient:
             if activate:
                 self.http.update_app(app_id, {"status": "active"})
 
-        secret_sync = self._sync_secret_definitions(app_id, secret_definitions)
+        secret_sync = self._sync_secret_definitions(
+            app_id,
+            secret_definitions,
+            reconcile_runtime_secrets=reconcile_runtime_secrets,
+        )
 
         key_out = self.http.create_key(
             app_id,
