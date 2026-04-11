@@ -405,6 +405,23 @@ class _FakeHttp:
         self.calls.append("get_async_run_status")
         return {"ok": True, "run": {"run_id": run_id, "status": "completed"}}
 
+    def stream_logs(
+        self,
+        app_id: str,
+        *,
+        runtime_key: str | None = None,
+        app_header_key: str | None = None,
+    ):
+        _ = (app_id, runtime_key, app_header_key)
+        self.calls.append("stream_logs")
+        yield {
+            "timestamp": "2026-04-10T00:00:00Z",
+            "level": "info",
+            "run_id": "run_test_1",
+            "event_type": "run.started",
+            "message": "Run started",
+        }
+
 
 def _manifest_with_runtime(runtime_profile: dict) -> dict:
     return {
@@ -554,6 +571,52 @@ def test_run_async_and_status_support_header_key(tmp_path):
     assert "get_async_run_status" in fake_http.calls
 
 
+def test_logs_accept_explicit_runtime_key(tmp_path):
+    client = core.AraClient(
+        manifest=_manifest_with_runtime(runtime_profile={}),
+        api_base_url="https://api.ara.so",
+        api_key="token",
+        cwd=tmp_path,
+    )
+
+    class _ExistingHttp(_FakeHttp):
+        def __init__(self):
+            super().__init__()
+            self.stream_call: dict | None = None
+
+        def list_apps(self) -> dict:
+            self.calls.append("list_apps")
+            return {"apps": [{"id": "app_existing_1", "slug": "test-app", "role": "owner"}]}
+
+        def stream_logs(
+            self,
+            app_id: str,
+            *,
+            runtime_key: str | None = None,
+            app_header_key: str | None = None,
+        ):
+            self.stream_call = {
+                "app_id": app_id,
+                "runtime_key": runtime_key,
+                "app_header_key": app_header_key,
+            }
+            yield from super().stream_logs(
+                app_id,
+                runtime_key=runtime_key,
+                app_header_key=app_header_key,
+            )
+
+    fake_http = _ExistingHttp()
+    client.http = fake_http
+
+    rows = list(client.logs(runtime_key="ak_app_inline"))
+    assert rows
+    assert fake_http.stream_call is not None
+    assert fake_http.stream_call["app_id"] == "app_existing_1"
+    assert fake_http.stream_call["runtime_key"] == "ak_app_inline"
+    assert fake_http.stream_call["app_header_key"] == ""
+
+
 def test_cli_up_alias_dispatches_to_deploy(monkeypatch, capsys):
     class _StubClient:
         def __init__(self):
@@ -619,6 +682,40 @@ def test_cli_setup_auth_dispatches_to_client(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert '"ok": true' in out.lower()
     assert '"app_id": "app_test_1"' in out
+
+
+def test_cli_logs_streams_runtime_lines(monkeypatch, capsys):
+    class _StubClient:
+        def logs(self):
+            yield {
+                "timestamp": "2026-04-10T01:02:03Z",
+                "level": "info",
+                "run_id": "run_abc123",
+                "event_type": "run.started",
+                "message": "Run started",
+            }
+            yield {
+                "timestamp": "2026-04-10T01:02:04Z",
+                "level": "error",
+                "run_id": "run_abc123",
+                "event_type": "run.failed",
+                "message": "Tool failed",
+            }
+
+    stub = _StubClient()
+    monkeypatch.setattr(
+        core.AraClient,
+        "from_env",
+        classmethod(lambda cls, *, manifest, cwd=None: stub),
+    )
+
+    core.run_cli(
+        _manifest_with_runtime(runtime_profile={}),
+        argv=["logs"],
+    )
+    out = capsys.readouterr().out
+    assert "run=run_abc123 event=run.started" in out
+    assert "ERROR run=run_abc123 event=run.failed Tool failed" in out
 
 
 def test_adapter_helpers_shapes():

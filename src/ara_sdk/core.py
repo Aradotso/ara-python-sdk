@@ -1347,6 +1347,64 @@ class _Http:
             auth_header=auth_header,
         )
 
+    def stream_logs(
+        self,
+        app_id: str,
+        *,
+        runtime_key: Optional[str] = None,
+        app_header_key: Optional[str] = None,
+    ):
+        headers: dict[str, str] = {"Accept": "text/event-stream"}
+        auth_header: Optional[str] = None
+        if app_header_key:
+            headers["X-Ara-App-Key"] = app_header_key
+            auth_header = ""
+        elif runtime_key:
+            auth_header = f"Bearer {runtime_key}"
+        else:
+            raise RuntimeError("stream_logs requires runtime_key or app_header_key")
+
+        # We intentionally mirror _request() auth header assembly here because
+        # urllib streaming uses urlopen directly (instead of _request, which
+        # buffers full responses and does not expose an iterable body stream).
+        req_headers: dict[str, str] = {}
+        if auth_header is not None:
+            if auth_header:
+                req_headers["Authorization"] = auth_header
+        elif self.api_key:
+            req_headers["Authorization"] = f"Bearer {self.api_key}"
+        req_headers.update(headers)
+        req = urllib.request.Request(
+            f"{self.base_url}/v1/apps/{app_id}/logs/stream",
+            method="GET",
+            headers=req_headers,
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as response:
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line or line.startswith(":"):
+                        continue
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if not payload:
+                        continue
+                    try:
+                        yield json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+        except urllib.error.HTTPError as exc:
+            details = exc.read().decode("utf-8", errors="replace")
+            if _env_flag_enabled(DEBUG_HTTP_ERRORS_ENV):
+                raise RuntimeError(
+                    f"GET /v1/apps/{app_id}/logs/stream failed ({exc.code}): {details}"
+                ) from exc
+            raise RuntimeError(
+                f"GET /v1/apps/{app_id}/logs/stream failed ({exc.code}). "
+                f"Response body hidden by default; set {DEBUG_HTTP_ERRORS_ENV}=true to include it."
+            ) from exc
+
     def setup(self, app_id: str) -> dict[str, Any]:
         return self._request(f"/apps/{app_id}/setup")
 
@@ -1742,6 +1800,26 @@ class AraClient:
             app_header_key=resolved_header_key,
         )
 
+    def logs(
+        self,
+        *,
+        runtime_key: Optional[str] = None,
+        app_header_key: Optional[str] = None,
+    ):
+        app = self._find_app_by_slug()
+        if not app:
+            raise RuntimeError(f"App '{self.manifest.get('slug')}' not found. Deploy first.")
+        resolved_header_key = self._resolve_app_header_key(app_header_key)
+        key = self._resolve_runtime_key(runtime_key) if not resolved_header_key else ""
+        if not resolved_header_key and not key:
+            raise RuntimeError("Missing runtime key. Set ARA_RUNTIME_KEY, ARA_APP_HEADER_KEY, or run deploy/setup-auth first.")
+        for row in self.http.stream_logs(
+            str(app["id"]),
+            runtime_key=key,
+            app_header_key=resolved_header_key,
+        ):
+            yield row
+
     def invite(self, *, email: str, role: str = "viewer", expires_in_hours: int = 24 * 7) -> dict[str, Any]:
         app = self._find_app_by_slug()
         if not app:
@@ -1759,6 +1837,16 @@ def _parse_pairs(items: list[str]) -> dict[str, str]:
         if key:
             out[key] = value
     return out
+
+
+def _format_runtime_log_line(row: dict[str, Any]) -> str:
+    timestamp = str(row.get("timestamp") or row.get("created_at") or "").strip()
+    level = str(row.get("level") or "info").strip().upper() or "INFO"
+    run_id = str(row.get("run_id") or "-").strip() or "-"
+    event_type = str(row.get("event_type") or "runtime.event").strip() or "runtime.event"
+    message = str(row.get("message") or "").strip()
+    base = f"{timestamp} {level} run={run_id} event={event_type}"
+    return f"{base} {message}".strip()
 
 
 def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, default_command: str = "deploy") -> None:
@@ -1811,6 +1899,8 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
     p_run_status = sub.add_parser("run-status")
     p_run_status.add_argument("--run-id", default="")
     p_run_status.add_argument("--app-header-key", default="")
+
+    sub.add_parser("logs")
 
     p_invite = sub.add_parser("invite")
     p_invite.add_argument("--email", default="")
@@ -1934,6 +2024,14 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
         if not rid:
             raise RuntimeError("run-status requires --run-id")
         print(json.dumps(client.run_status(run_id=rid, app_header_key=args.app_header_key or None), indent=2))
+        return
+
+    if command == "logs":
+        try:
+            for row in client.logs():
+                print(_format_runtime_log_line(row), flush=True)
+        except KeyboardInterrupt:
+            return
         return
 
     if command == "invite":

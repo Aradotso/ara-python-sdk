@@ -64,8 +64,16 @@ python app.py deploy
 python app.py setup-auth
 python app.py run --agent booking-coordinator --message "Need 3 slots next week"
 python app.py run-async --agent booking-coordinator --message "Need 3 slots next week" --response-mode poll
+python app.py logs
 python app.py events --event-type channel.web.inbound --channel web --message "hello"
 python app.py setup
+```
+
+`python app.py logs` streams live runtime events for the app across all active runs.
+Each line includes timestamp + run id + event type. To persist output, use shell piping:
+
+```bash
+python app.py logs | tee app.logs
 ```
 
 ## Environment
