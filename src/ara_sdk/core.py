@@ -2281,7 +2281,7 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
                     "runtime_key_created": bool(deploy_out.get("runtime_key_created")),
                     "runtime_key": str(deploy_out.get("runtime_key") or ""),
                     "next": {
-                        "setup_auth_command": "python app.py setup-auth",
+                        "setup_auth_command": "ara setup-auth app.py",
                     },
                 },
                 indent=2,

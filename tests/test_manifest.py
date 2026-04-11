@@ -832,6 +832,7 @@ def test_cli_up_alias_dispatches_to_deploy(monkeypatch, capsys):
     assert '"ok": true' in cli_out.lower()
     assert '"slug": "test-app"' in cli_out.lower()
     assert '"runtime_key_created": true' in cli_out.lower()
+    assert '"setup_auth_command": "ara setup-auth app.py"' in cli_out
     assert "OPENAI_API_KEY" not in cli_out
     assert "sk-local" not in cli_out
 
