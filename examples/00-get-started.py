@@ -16,13 +16,3 @@ app = App(
 )
 def hello_agent():
     """Basic entrypoint agent."""
-
-
-@app.local_entrypoint()
-def local(input_payload: dict[str, str]):
-    name = str((input_payload or {}).get("name") or "").strip() or "world"
-    return {
-        "ok": True,
-        "message": f"Hello, {name}!",
-        "agent_id": "hello-agent",
-    }

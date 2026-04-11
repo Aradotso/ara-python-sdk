@@ -34,15 +34,3 @@ Draft concise follow-up text for pending threads using tone='{tone}'.
     return """
 Draft concise follow-up text for pending threads.
 """.strip()
-
-
-@app.local_entrypoint()
-def local(input_payload: dict[str, str]):
-    adapter = app.manifest["agent"]["subagents"][0]["runtime"]["adapter"]
-    return {
-        "ok": True,
-        "framework": adapter["framework"],
-        "transport": adapter["transport"],
-        "entrypoint": adapter["entrypoint"],
-        "message": input_payload.get("message", "hello from agno example"),
-    }

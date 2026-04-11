@@ -1,6 +1,5 @@
 import importlib.util
 import io
-import os
 from types import ModuleType
 import urllib.error
 
@@ -687,7 +686,9 @@ def test_deploy_without_runtime_secrets_does_not_reconcile_app_secrets(tmp_path)
     assert all(not call.startswith("delete_secret:") for call in fake_http.calls)
 
 
-def test_setup_auth_creates_app_header_key_without_local_files(tmp_path):
+def test_setup_auth_creates_app_header_key_without_local_files(tmp_path, monkeypatch):
+    monkeypatch.delenv("ARA_RUNTIME_KEY", raising=False)
+    monkeypatch.delenv("ARA_APP_HEADER_KEY", raising=False)
     client = core.AraClient(
         manifest=_manifest_with_runtime(runtime_profile={}),
         api_base_url="https://api.ara.so",
@@ -858,55 +859,12 @@ def test_cli_setup_auth_dispatches_to_client(monkeypatch, capsys):
     assert '"app_id": "app_test_1"' in out
 
 
-def test_cli_local_does_not_require_api_key(monkeypatch, capsys):
-    app = App(name="Local CLI App", project_name="local-cli-app")
-
-    @app.local_entrypoint()
-    def local(input_payload: dict[str, str]):
-        return {"echo": str(input_payload.get("text") or "")}
-
-    monkeypatch.delenv("ARA_API_KEY", raising=False)
-
-    def _from_env_should_not_run(cls, *, manifest, cwd=None):  # noqa: ARG001
-        raise AssertionError("AraClient.from_env should not run for local command")
-
-    monkeypatch.setattr(
-        core.AraClient,
-        "from_env",
-        classmethod(_from_env_should_not_run),
-    )
-
-    core.run_cli(app, argv=["local", "--input", "text=hello-local"])
-    out = capsys.readouterr().out
-    assert '"ok": true' in out.lower()
-    assert '"echo": "hello-local"' in out
-
-
-def test_cli_local_loads_dotenv_without_api_key(monkeypatch, tmp_path, capsys):
-    app = App(name="Local CLI Env App", project_name="local-cli-env-app")
-
-    @app.local_entrypoint()
-    def local(_input_payload: dict[str, str]):
-        return {"local_env": str(os.getenv("LOCAL_ONLY_VALUE") or "")}
-
-    (tmp_path / ".env").write_text("LOCAL_ONLY_VALUE=from-dotenv\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("LOCAL_ONLY_VALUE", raising=False)
-    monkeypatch.delenv("ARA_API_KEY", raising=False)
-
-    def _from_env_should_not_run(cls, *, manifest, cwd=None):  # noqa: ARG001
-        raise AssertionError("AraClient.from_env should not run for local command")
-
-    monkeypatch.setattr(
-        core.AraClient,
-        "from_env",
-        classmethod(_from_env_should_not_run),
-    )
-
-    core.run_cli(app, argv=["local"])
-    out = capsys.readouterr().out
-    assert '"ok": true' in out.lower()
-    assert '"local_env": "from-dotenv"' in out
+def test_cli_rejects_unknown_subcommand(capsys):
+    with pytest.raises(SystemExit) as exc:
+        core.run_cli(_manifest_with_runtime(runtime_profile={}), argv=["not-a-command"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "invalid choice" in err
 
 
 def test_cli_logs_streams_runtime_lines(monkeypatch, capsys):

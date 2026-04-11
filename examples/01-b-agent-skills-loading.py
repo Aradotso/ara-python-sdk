@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pathlib
-import shlex
 import sys
 
 for parent in pathlib.Path(__file__).resolve().parents:
@@ -99,20 +98,3 @@ Return only the transformed title-case text and no diagnostics.
 """.strip()
 
 
-@app.local_entrypoint()
-def local(input_payload: dict[str, str]):
-    text = str(input_payload.get("text") or input_payload.get("message") or "").strip()
-    resolved_text = text or "hello world"
-    return {
-        "ok": True,
-        "mode": "runtime-file-upload-reference",
-        "agent_id": "title-case-runtime-file-agent",
-        "input_text": resolved_text,
-        "uploaded_script_path": SCRIPT_PATH,
-        "source_file": str(SCRIPT_SOURCE_FILE),
-        "command_to_run": (
-            f'python3 /root/.ara/workspace/.apps/$APP_ID/{SCRIPT_PATH} '
-            f"--text {shlex.quote(resolved_text)}"
-        ),
-        "runtime_files": app.manifest.get("runtime_profile", {}).get("files", []),
-    }

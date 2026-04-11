@@ -80,11 +80,3 @@ Always call title_case_decorator with the user's text.
 If tool execution fails for any reason, compute title case directly as a fallback.
 Return only the transformed title-case text as plain text (no quotes, no markdown, no diagnostics).
 """.strip()
-
-
-@app.local_entrypoint()
-def local(input_payload: dict[str, str]):
-    text = str(input_payload.get("text") or input_payload.get("message") or "").strip()
-    if not text:
-        return {"ok": False, "error": "Provide --input text='hello world'"}
-    return title_case_decorator(text)

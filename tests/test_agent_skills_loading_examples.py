@@ -33,8 +33,6 @@ def _run_app_json(
     if not args:
         raise AssertionError("Expected at least one CLI command argument")
     command = [sys.executable, "-m", "ara_sdk", args[0], app_file, *args[1:]]
-    if args[0] == "local" and not merged_env.get("ARA_API_KEY"):
-        merged_env["ARA_API_KEY"] = "local-demo-key"
     transient_markers = (
         "failed (500)",
         "failed (502)",
@@ -104,30 +102,24 @@ def test_examples_do_not_inject_fake_api_keys() -> None:
         assert 'sys.argv[1] == "local"' not in source
 
 
-def test_example_local_entrypoints_smoke() -> None:
-    # Even without a CLI `local` subcommand, examples still expose local entrypoints
-    # that can be invoked directly for deterministic metadata inspection.
+def test_example_manifests_smoke() -> None:
+    # Validate example wiring without any local execution hook.
     inline_mod = _load_example_module("skill_inline_example", "01-a-agent-skills-loading.py")
-    inline = inline_mod.app.call_local_entrypoint({"text": "hello from ara sdk"})
-    assert inline["ok"] is True
-    assert inline["mode"] == "inline-instructions-only"
-    assert "python3 -c " in inline["command_to_run"]
-    assert " -- " in inline["command_to_run"]
+    inline_manifest = inline_mod.app.manifest
+    inline_agents = inline_manifest["agent"]["agents"]
+    assert inline_agents[0]["id"] == "title-case-inline-instructions-agent"
+    assert "prompt_factory" in inline_agents[0]
 
     script_mod = _load_example_module("skill_script_example", "01-b-agent-skills-loading.py")
-    script = script_mod.app.call_local_entrypoint({"text": "hello from ara sdk"})
-    assert script["ok"] is True
-    assert script["mode"] == "runtime-file-upload-reference"
-    assert script["uploaded_script_path"] == "scripts/title_case.py"
-    runtime_files = script["runtime_files"]
+    script_manifest = script_mod.app.manifest
+    runtime_files = script_manifest["runtime_profile"]["files"]
     assert isinstance(runtime_files, list) and runtime_files
     assert runtime_files[0]["path"] == "scripts/title_case.py"
 
     decorator_mod = _load_example_module("skill_decorator_example", "01-c-agent-skills-loading.py")
-    decorator = decorator_mod.app.call_local_entrypoint({"text": "hello from ara sdk"})
-    assert decorator["ok"] is True
-    assert decorator["method"] == "decorator-handler"
-    assert decorator["result"] == "Hello From Ara Sdk"
+    decorator_manifest = decorator_mod.app.manifest
+    tools = decorator_manifest["agent"]["tools"]
+    assert tools[0]["function"]["name"] == "title_case_decorator"
 
 
 @pytest.mark.skipif(

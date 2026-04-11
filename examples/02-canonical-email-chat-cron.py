@@ -128,12 +128,3 @@ For reliable recurring sends, prefer automation_create with execution_kind='app_
 tool_name='send_email', and tool_args {'to','subject','body'}.
 Only claim success if tool output confirms it.
 """.strip()
-
-
-@app.local_entrypoint()
-def local(input_payload):
-    return {
-        "ok": True,
-        "input": input_payload,
-        "chat_agent_id": CHAT_AGENT_ID,
-    }

@@ -31,15 +31,3 @@ Route incoming messages to the framework worker using route='{route}'.
     return """
 Route incoming messages to the framework worker.
 """.strip()
-
-
-@app.local_entrypoint()
-def local(input_payload: dict[str, str]):
-    adapter = app.manifest["agent"]["subagents"][0]["runtime"]["adapter"]
-    return {
-        "ok": True,
-        "framework": adapter["framework"],
-        "transport": adapter["transport"],
-        "entrypoint": adapter["entrypoint"],
-        "message": input_payload.get("message", "hello from langgraph example"),
-    }
