@@ -1907,9 +1907,6 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
     p_invite.add_argument("--role", default="viewer")
     p_invite.add_argument("--expires-hours", type=int, default=24 * 7)
 
-    p_local = sub.add_parser("local")
-    p_local.add_argument("--input", action="append", default=[])
-
     sub.add_parser("setup")
     p_setup_auth = sub.add_parser("setup-auth")
     p_setup_auth.add_argument("--x-key-name", default="")
@@ -2039,12 +2036,6 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
         if not email:
             raise RuntimeError("invite requires --email")
         print(json.dumps(client.invite(email=email, role=args.role, expires_in_hours=args.expires_hours), indent=2))
-        return
-
-    if command == "local":
-        if app_obj is None:
-            raise RuntimeError("local command requires an App(...) instance")
-        print(json.dumps({"ok": True, "result": app_obj.call_local_entrypoint(_parse_pairs(args.input))}, indent=2))
         return
 
     if command == "setup":

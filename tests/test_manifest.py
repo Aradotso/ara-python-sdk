@@ -684,6 +684,14 @@ def test_cli_setup_auth_dispatches_to_client(monkeypatch, capsys):
     assert '"app_id": "app_test_1"' in out
 
 
+def test_cli_rejects_removed_local_command():
+    with pytest.raises(SystemExit):
+        core.run_cli(
+            _manifest_with_runtime(runtime_profile={}),
+            argv=["local", "--input", "message=hello"],
+        )
+
+
 def test_cli_logs_streams_runtime_lines(monkeypatch, capsys):
     class _StubClient:
         def logs(self):

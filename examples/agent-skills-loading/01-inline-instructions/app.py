@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import pathlib
 import shlex
 import sys
@@ -69,7 +68,4 @@ def local(input_payload: dict[str, str]):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "local":
-        if not os.getenv("ARA_API_KEY") and not os.getenv("ARA_ACCESS_TOKEN"):
-            os.environ["ARA_API_KEY"] = "local-demo-key"
     run_cli(app)

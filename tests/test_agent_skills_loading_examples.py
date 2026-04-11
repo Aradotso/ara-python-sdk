@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import pathlib
 import subprocess
@@ -11,6 +12,11 @@ import pytest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 EXAMPLES_ROOT = REPO_ROOT / "examples" / "agent-skills-loading"
+EXAMPLE_VARIANT_FOLDERS = (
+    "01-inline-instructions",
+    "02-script-referenced",
+    "03-decorator-handler",
+)
 
 
 def _run_app_json(
@@ -75,42 +81,48 @@ def _extract_output_text(run_payload: dict) -> str:
     return str(value or "").strip()
 
 
-def test_local_examples_smoke() -> None:
-    # 01 and 02 local mode intentionally return command/runtime metadata so developers
-    # can inspect execution patterns before deploying live runs.
-    inline = _run_app_json(
-        EXAMPLES_ROOT / "01-inline-instructions",
-        "local",
-        "--input",
-        "text=hello from ara sdk",
-    )
-    assert inline["ok"] is True
-    assert inline["result"]["mode"] == "inline-instructions-only"
-    assert "python3 -c " in inline["result"]["command_to_run"]
-    assert " -- " in inline["result"]["command_to_run"]
+def _load_example_module(name: str, folder: str):
+    path = EXAMPLES_ROOT / folder / "app.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise AssertionError(f"Failed to load module spec: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
-    script = _run_app_json(
-        EXAMPLES_ROOT / "02-script-referenced",
-        "local",
-        "--input",
-        "text=hello from ara sdk",
-    )
+
+def test_examples_do_not_inject_fake_api_keys() -> None:
+    # Regression guard: examples must not silently inject fake auth keys.
+    for folder in EXAMPLE_VARIANT_FOLDERS:
+        source = (EXAMPLES_ROOT / folder / "app.py").read_text(encoding="utf-8")
+        assert "local-demo-key" not in source
+        assert 'sys.argv[1] == "local"' not in source
+
+
+def test_example_local_entrypoints_smoke() -> None:
+    # Even without a CLI `local` subcommand, examples still expose local entrypoints
+    # that can be invoked directly for deterministic metadata inspection.
+    inline_mod = _load_example_module("skill_inline_example", "01-inline-instructions")
+    inline = inline_mod.app.call_local_entrypoint({"text": "hello from ara sdk"})
+    assert inline["ok"] is True
+    assert inline["mode"] == "inline-instructions-only"
+    assert "python3 -c " in inline["command_to_run"]
+    assert " -- " in inline["command_to_run"]
+
+    script_mod = _load_example_module("skill_script_example", "02-script-referenced")
+    script = script_mod.app.call_local_entrypoint({"text": "hello from ara sdk"})
     assert script["ok"] is True
-    assert script["result"]["mode"] == "runtime-file-upload-reference"
-    assert script["result"]["uploaded_script_path"] == "scripts/title_case.py"
-    runtime_files = script["result"]["runtime_files"]
+    assert script["mode"] == "runtime-file-upload-reference"
+    assert script["uploaded_script_path"] == "scripts/title_case.py"
+    runtime_files = script["runtime_files"]
     assert isinstance(runtime_files, list) and runtime_files
     assert runtime_files[0]["path"] == "scripts/title_case.py"
 
-    decorator = _run_app_json(
-        EXAMPLES_ROOT / "03-decorator-handler",
-        "local",
-        "--input",
-        "text=hello from ara sdk",
-    )
+    decorator_mod = _load_example_module("skill_decorator_example", "03-decorator-handler")
+    decorator = decorator_mod.app.call_local_entrypoint({"text": "hello from ara sdk"})
     assert decorator["ok"] is True
-    assert decorator["result"]["method"] == "decorator-handler"
-    assert decorator["result"]["result"] == "Hello From Ara Sdk"
+    assert decorator["method"] == "decorator-handler"
+    assert decorator["result"] == "Hello From Ara Sdk"
 
 
 @pytest.mark.skipif(
