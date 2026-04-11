@@ -44,3 +44,21 @@ def test_standalone_cli_usage_mentions_invoked_binary(monkeypatch):
     with pytest.raises(SystemExit, match=r"Usage: ara <command> <app_script.py> \[args...\]"):
         sdk_main.main()
 
+
+def test_runtime_cli_dispatches_without_app_script(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _run_runtime_cli(argv=None):
+        captured["argv"] = list(argv or [])
+
+    monkeypatch.setattr(sdk_main, "run_runtime_cli", _run_runtime_cli)
+    monkeypatch.setattr(
+        sdk_main.sys,
+        "argv",
+        ["ara", "runtime", "capabilities", "--session", "sess-123"],
+    )
+
+    sdk_main.main()
+
+    assert captured["argv"] == ["capabilities", "--session", "sess-123"]
+

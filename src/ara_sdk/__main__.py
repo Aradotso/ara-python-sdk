@@ -5,7 +5,7 @@ import pathlib
 import sys
 from types import ModuleType
 
-from .core import App, run_cli
+from .core import App, run_cli, run_runtime_cli
 
 
 def _load_module(path: pathlib.Path) -> ModuleType:
@@ -26,6 +26,9 @@ def _discover_app(module: ModuleType) -> App:
 
 def main() -> None:
     bin_name = pathlib.Path(sys.argv[0]).name or "ara"
+    if len(sys.argv) >= 2 and sys.argv[1] == "runtime":
+        run_runtime_cli(argv=sys.argv[2:])
+        return
     if len(sys.argv) < 3:
         raise SystemExit(f"Usage: {bin_name} <command> <app_script.py> [args...]")
     command = sys.argv[1]

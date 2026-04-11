@@ -12,6 +12,7 @@ import pathlib
 import re
 import textwrap
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Callable, NoReturn, Optional
@@ -1861,6 +1862,102 @@ class AraClient:
         return self.http.invite(str(app["id"]), email=email, role=role, expires_in_hours=expires_in_hours)
 
 
+class AraRuntimeClient:
+    """User-scoped runtime client (session/runtime tooling)."""
+
+    def __init__(self, *, api_base_url: str, api_key: str, cwd: pathlib.Path):
+        self.cwd = cwd
+        self.http = _Http(api_base_url, api_key)
+
+    @classmethod
+    def from_env(cls, *, cwd: Optional[str] = None) -> "AraRuntimeClient":
+        base = pathlib.Path(cwd or os.getcwd())
+        _read_dotenv(base / ".env")
+        if not os.getenv("ARA_API_BASE_URL", "").strip():
+            os.environ["ARA_API_BASE_URL"] = DEFAULT_API_BASE_URL
+        api_key = os.getenv("ARA_API_KEY", "").strip() or os.getenv("ARA_ACCESS_TOKEN", "").strip()
+        if not api_key:
+            raise RuntimeError(
+                "Missing required env var: ARA_API_KEY. "
+                "Legacy ARA_ACCESS_TOKEN is still accepted as a fallback."
+            )
+        return cls(
+            api_base_url=os.getenv("ARA_API_BASE_URL", DEFAULT_API_BASE_URL).strip() or DEFAULT_API_BASE_URL,
+            api_key=api_key,
+            cwd=base,
+        )
+
+    @staticmethod
+    def _with_query(path: str, params: dict[str, Any]) -> str:
+        encoded = urllib.parse.urlencode(
+            {k: v for k, v in params.items() if str(v or "").strip()},
+            doseq=True,
+        )
+        if not encoded:
+            return path
+        return f"{path}?{encoded}"
+
+    def capabilities(self, *, session_id: str, agent_id: str = "") -> dict[str, Any]:
+        path = self._with_query(
+            "/session/runtime/capabilities",
+            {"session_id": session_id, "agent_id": agent_id},
+        )
+        return self.http._request(path, method="GET")
+
+    def skills(self, *, session_id: str) -> dict[str, Any]:
+        path = self._with_query("/session/runtime/skills", {"session_id": session_id})
+        return self.http._request(path, method="GET")
+
+    def tools(self, *, session_id: str, kind: str = "all", agent_id: str = "") -> dict[str, Any]:
+        path = self._with_query(
+            "/session/runtime/tools",
+            {"session_id": session_id, "kind": kind, "agent_id": agent_id},
+        )
+        return self.http._request(path, method="GET")
+
+    def execute_tool(
+        self,
+        *,
+        session_id: str,
+        tool_name: str,
+        args: dict[str, Any],
+        agent_id: str = "",
+    ) -> dict[str, Any]:
+        return self.http._request(
+            "/session/runtime/tools/execute",
+            method="POST",
+            body={
+                "session_id": session_id,
+                "tool_name": tool_name,
+                "args": args,
+                "agent_id": agent_id or None,
+            },
+        )
+
+    def control_actions(self, *, session_id: str) -> dict[str, Any]:
+        path = self._with_query("/session/runtime/control/actions", {"session_id": session_id})
+        return self.http._request(path, method="GET")
+
+    def control_call(
+        self,
+        *,
+        session_id: str,
+        action: str,
+        args: dict[str, Any],
+        timeout_ms: int = 8000,
+    ) -> dict[str, Any]:
+        return self.http._request(
+            "/session/runtime/control/call",
+            method="POST",
+            body={
+                "session_id": session_id,
+                "action": action,
+                "args": args,
+                "timeout_ms": int(timeout_ms),
+            },
+        )
+
+
 def _parse_pairs(items: list[str]) -> dict[str, str]:
     out: dict[str, str] = {}
     for item in items:
@@ -1881,6 +1978,117 @@ def _format_runtime_log_line(row: dict[str, Any]) -> str:
     message = str(row.get("message") or "").strip()
     base = f"{timestamp} {level} run={run_id} event={event_type}"
     return f"{base} {message}".strip()
+
+
+def run_runtime_cli(argv: Optional[list[str]] = None) -> None:
+    parser = argparse.ArgumentParser(description="Ara runtime CLI")
+    sub = parser.add_subparsers(dest="scope", required=True)
+
+    p_cap = sub.add_parser("capabilities")
+    p_cap.add_argument("--session", required=True)
+    p_cap.add_argument("--agent", default="")
+
+    p_skills = sub.add_parser("skills")
+    sub_skills = p_skills.add_subparsers(dest="command", required=True)
+    p_skills_list = sub_skills.add_parser("list")
+    p_skills_list.add_argument("--session", required=True)
+
+    p_tools = sub.add_parser("tools")
+    sub_tools = p_tools.add_subparsers(dest="command", required=True)
+    p_tools_list = sub_tools.add_parser("list")
+    p_tools_list.add_argument("--session", required=True)
+    p_tools_list.add_argument("--kind", choices=["all", "builtin", "app", "connector"], default="all")
+    p_tools_list.add_argument("--agent", default="")
+    p_tools_exec = sub_tools.add_parser("execute")
+    p_tools_exec.add_argument("--session", required=True)
+    p_tools_exec.add_argument("--tool", default="")
+    p_tools_exec.add_argument("--agent", default="")
+    p_tools_exec.add_argument("--arg", action="append", default=[])
+
+    p_control = sub.add_parser("control")
+    sub_control = p_control.add_subparsers(dest="command", required=True)
+    p_control_actions = sub_control.add_parser("actions")
+    p_control_actions.add_argument("--session", required=True)
+    p_control_call = sub_control.add_parser("call")
+    p_control_call.add_argument("--session", required=True)
+    p_control_call.add_argument("--action", default="")
+    p_control_call.add_argument("--timeout-ms", type=int, default=8000)
+    p_control_call.add_argument("--arg", action="append", default=[])
+
+    args = parser.parse_args(argv)
+    try:
+        client = AraRuntimeClient.from_env(cwd=os.getcwd())
+    except RuntimeError as exc:
+        raise SystemExit(f"ara runtime: {exc}") from None
+
+    if args.scope == "capabilities":
+        print(
+            json.dumps(
+                client.capabilities(
+                    session_id=args.session,
+                    agent_id=args.agent or "",
+                ),
+                indent=2,
+            )
+        )
+        return
+
+    if args.scope == "skills" and args.command == "list":
+        print(json.dumps(client.skills(session_id=args.session), indent=2))
+        return
+
+    if args.scope == "tools" and args.command == "list":
+        print(
+            json.dumps(
+                client.tools(
+                    session_id=args.session,
+                    kind=args.kind or "all",
+                    agent_id=args.agent or "",
+                ),
+                indent=2,
+            )
+        )
+        return
+
+    if args.scope == "tools" and args.command == "execute":
+        tool_name = str(args.tool or "").strip()
+        if not tool_name:
+            raise SystemExit("ara runtime: tools execute requires --tool")
+        print(
+            json.dumps(
+                client.execute_tool(
+                    session_id=args.session,
+                    tool_name=tool_name,
+                    args=_parse_pairs(args.arg or []),
+                    agent_id=args.agent or "",
+                ),
+                indent=2,
+            )
+        )
+        return
+
+    if args.scope == "control" and args.command == "actions":
+        print(json.dumps(client.control_actions(session_id=args.session), indent=2))
+        return
+
+    if args.scope == "control" and args.command == "call":
+        action = str(args.action or "").strip()
+        if not action:
+            raise SystemExit("ara runtime: control call requires --action")
+        print(
+            json.dumps(
+                client.control_call(
+                    session_id=args.session,
+                    action=action,
+                    args=_parse_pairs(args.arg or []),
+                    timeout_ms=int(args.timeout_ms or 8000),
+                ),
+                indent=2,
+            )
+        )
+        return
+
+    parser.print_help()
 
 
 def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, default_command: str = "deploy") -> None:

@@ -75,6 +75,18 @@ ara events app.py --event-type channel.web.inbound --channel web --message "hell
 ara setup app.py
 ```
 
+Runtime introspection and control (user API key auth, no app script required):
+
+```bash
+ara runtime capabilities --session sess-123
+ara runtime skills list --session sess-123
+ara runtime tools list --session sess-123 --kind builtin
+ara runtime tools execute --session sess-123 --tool exec --arg command="ls -la"
+ara runtime control actions --session sess-123
+ara runtime control call --session sess-123 --action list_windows
+ara runtime control call --session sess-123 --action launch_app --arg id=browser --arg url=https://mail.google.com
+```
+
 If you prefer embedded script commands (`python app.py deploy`), add:
 
 ```python
