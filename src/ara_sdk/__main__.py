@@ -18,7 +18,7 @@ def _print_help(bin_name: str) -> None:
                 "  deploy, up, run, run-async, run-status, logs, events, setup, setup-auth, invite",
                 "",
                 "Global command groups (no app script required):",
-                "  auth      login/whoami/logout for CLI auth",
+                "  auth      login/whoami/logout/rotate for CLI auth",
                 "  runtime   runtime capabilities, tools, skills, and control APIs",
                 "",
                 "Examples:",

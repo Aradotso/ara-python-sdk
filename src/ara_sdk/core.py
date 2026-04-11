@@ -1872,6 +1872,9 @@ class _Http:
     def cli_whoami(self) -> dict[str, Any]:
         return self._request("/auth/cli/whoami", method="GET")
 
+    def rotate_api_key(self) -> dict[str, Any]:
+        return self._request("/apps/api-key/rotate", method="POST")
+
 
 class AraClient:
     """Runtime client bound to one App manifest."""
@@ -2635,6 +2638,9 @@ def run_auth_cli(argv: Optional[list[str]] = None) -> None:
 
     sub.add_parser("logout")
 
+    p_rotate = sub.add_parser("rotate", help="Rotate your API key (invalidates the current one).")
+    p_rotate.add_argument("--api-base-url", default="")
+
     args = parser.parse_args(argv)
     command = str(args.command or "").strip().lower()
 
@@ -2644,6 +2650,33 @@ def run_auth_cli(argv: Optional[list[str]] = None) -> None:
         return
 
     api_base_url = str(getattr(args, "api_base_url", "") or "").strip() or _resolve_api_base_url(DEFAULT_API_BASE_URL)
+
+    if command == "rotate":
+        bearer = _resolve_control_plane_bearer()
+        if not bearer:
+            raise SystemExit("ara auth: not logged in. Run `ara auth login` or set ARA_API_KEY.")
+        result = _Http(api_base_url, bearer).rotate_api_key()
+        new_key = str(result.get("api_key") or "").strip()
+        out: dict[str, Any] = {
+            "ok": True,
+            "status": "rotated",
+            "key_prefix": result.get("key_prefix", ""),
+            "key_identifier": result.get("key_identifier", ""),
+        }
+        credentials_updated = False
+        if os.getenv("ARA_API_KEY", "").strip() or os.getenv("ARA_ACCESS_TOKEN", "").strip():
+            out["warning"] = "Your ARA_API_KEY environment variable still holds the old key. Update it to: " + new_key
+        else:
+            creds = _load_cli_credentials()
+            if str(creds.get("auth_type") or "").strip() == "cli_api_key":
+                creds["api_key"] = new_key
+                _save_cli_credentials(creds)
+                credentials_updated = True
+        out["credentials_updated"] = credentials_updated
+        if credentials_updated:
+            out["credentials_path"] = str(_cli_credentials_path())
+        print(json.dumps(out, indent=2))
+        return
 
     if command == "whoami":
         bearer = _resolve_control_plane_bearer()
