@@ -8,6 +8,13 @@ Public Python SDK for building Ara apps with a decorator-first workflow style.
 pip install ara-sdk
 ```
 
+## Documentation
+
+- SDK overview: <https://docs.ara.so/sdk/overview>
+- SDK quickstart: <https://docs.ara.so/sdk/quickstart>
+- SDK reference: <https://docs.ara.so/sdk/reference>
+- Examples index: <https://docs.ara.so/examples/overview>
+
 ## Local testing (no uv)
 
 ```bash
@@ -16,6 +23,30 @@ source .venv/bin/activate
 python -m pip install -e . pytest
 python -m pytest -q
 ```
+
+## Run maintained examples
+
+All maintained examples are in `examples/` and ordered in `examples/README.md`.
+
+```bash
+cd examples
+cp .env.example .env.local
+# Fill ARA_API_KEY and provider keys in .env.local as needed.
+```
+
+Core flow per example:
+
+```bash
+ara deploy <example.py>
+ara setup-auth <example.py> --ensure-runtime-key true
+ara run <example.py> --agent <agent-id> --runtime-key "<runtime_key>" --message "hello"
+```
+
+Example-specific notes:
+
+- `01-c-agent-skills-loading.py` uses a local custom `@skill_handler` decorator inside the tool function; it is not an `ara-sdk` primitive.
+- `02-canonical-email-chat-cron.py` frontend requires `VITE_ARA_APP_ID` and `VITE_ARA_RUNTIME_KEY` in `examples/.env.local`.
+- `03-async-ngrok-webhook.py` requires both a local callback receiver and ngrok.
 
 ## Principles
 
@@ -30,8 +61,7 @@ from ara_sdk import App, Secret, invoke, runtime, schedule
 import os
 
 app = App(
-    "Investor Meeting Booker",
-    project_name="investor-meeting-booking",
+    "investor-meeting-booking",
     runtime_profile=runtime(
         secrets=[
             Secret.from_dotenv(),
@@ -40,27 +70,32 @@ app = App(
     ),
 )
 
-@app.tool(id="send_email", description="Send one email.")
+@app.tool()
 def send_email(to: str, subject: str, body: str) -> dict:
+    """Send one email."""
     return {"ok": True, "to": to, "subject": subject}
 
 DAILY_FOLLOWUPS = schedule.cron(
     id="daily-followups",
     expr="0 13 * * 1-5",
     timezone="UTC",
-    run=invoke.agent("booking-coordinator", input={"message": "Send pending follow-ups."}),
+    run=invoke.agent("booking_coordinator", input={"message": "Send pending follow-ups."}),
 )
 
 @app.agent(
-    id="booking-coordinator",
     entrypoint=True,
-    task="Coordinate scheduling requests.",
     skills=["send_email", "automation_create", "automation_list"],
     schedules=[DAILY_FOLLOWUPS],
 )
-def booking_coordinator():
+def booking_coordinator(payload: dict) -> str:
     """Coordinate scheduling requests."""
+    _ = payload if isinstance(payload, dict) else {}
+    return "Coordinate scheduling requests."
 ```
+
+`App(...)` takes the DNS-safe project name as its first argument.
+Use lowercase letters, digits, and hyphens only (no underscores), e.g. `my-app-1`.
+You can pass it positionally (`App("my-app-1")`) or as a keyword (`App(project_name="my-app-1")`).
 
 ```bash
 ara auth login
@@ -68,9 +103,9 @@ export OPENAI_API_KEY="your_provider_key"
 
 ara deploy app.py
 ara setup-auth app.py
-ara run app.py --agent booking-coordinator --message "Need 3 slots next week"
-ara run app.py --agent booking-coordinator --input-json '{"request":"Need 3 slots next week","context":{"caller":"cli"}}'
-ara run-async app.py --agent booking-coordinator --message "Need 3 slots next week" --response-mode poll
+ara run app.py --agent booking_coordinator --message "Need 3 slots next week"
+ara run app.py --agent booking_coordinator --input-json '{"request":"Need 3 slots next week","context":{"caller":"cli"}}'
+ara run-async app.py --agent booking_coordinator --message "Need 3 slots next week" --response-mode poll
 ara logs app.py
 ara events app.py --event-type channel.web.inbound --channel web --message "hello"
 ara setup app.py
@@ -86,15 +121,6 @@ ara runtime tools execute --session sess-123 --tool exec --arg command="ls -la"
 ara runtime control actions --session sess-123
 ara runtime control call --session sess-123 --action list_windows
 ara runtime control call --session sess-123 --action launch_app --arg id=browser --arg url=https://mail.google.com
-```
-
-If you prefer embedded script commands (`python app.py deploy`), add:
-
-```python
-from ara_sdk import run_cli
-
-if __name__ == "__main__":
-    run_cli(app)
 ```
 
 `ara logs app.py` streams live runtime events for the app across all active runs.
@@ -148,8 +174,7 @@ local `uv` workflows.
 from ara_sdk import App, entrypoint, local_file, runtime
 
 app = App(
-    "Research Assistant",
-    project_name="research-assistant",
+    "research-assistant",
     runtime_profile=runtime(
         image="python:3.12-slim",
         files=[
@@ -180,7 +205,6 @@ Secret helper options:
   - `Secret.from_dict("provider-local", {...})` for explicit naming
   - `Secret.from_dict({...})` (or `Secret.from_dict({...}, name="provider-local")`) for programmatic local secrets
 - `Secret.from_dotenv(name=None, filename=".env")` (auto-named when name omitted)
-- `Secret.from_local_environ(name, env_keys=[...])` (synced at deploy)
 
 Deploy behavior:
 
@@ -240,7 +264,7 @@ Example:
 from ara_sdk import invoke
 
 invoke.agent(
-    "title-case-agent",
+    "title_case_agent",
     input={
         "text": "hello world",
         "mode": "probe",
@@ -249,13 +273,13 @@ invoke.agent(
 )
 ```
 
-## Prompt factory agent mode (optional)
+## Prompt-based agent contract
 
-`@app.agent(..., prompt_factory=True)` records the agent function source in the manifest so runtimes can build per-run system instructions from JSON input.
+`@app.agent(...)` always records the agent function source in the manifest so runtimes can build per-run system instructions from JSON input.
 
-- Use this when you want the agent function body to compute the system prompt string.
-- If `task`/`instructions` are omitted, the SDK writes a default instruction note describing prompt-factory behavior.
-- Existing `task=` based apps remain fully supported.
+- Agent functions must accept exactly one input parameter (JSON payload) and return `str` (or omit the return annotation).
+- Define prompt behavior in the function body by returning the instruction string.
+- `task=` / `instructions=` are no longer part of the public agent decorator API.
 
 ## Examples
 

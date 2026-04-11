@@ -66,6 +66,7 @@ MAGIC_NUMBER_SPAWN_DEFAULT_EPHEMERAL_TTL_MINUTES = 10
 MAGIC_NUMBER_SPAWN_HARD_MAX_EPHEMERAL_TTL_MINUTES = 240
 ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 SECRET_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}[a-z0-9]$")
+PROJECT_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 RESERVED_ENV_KEYS = frozenset({"SESSION_ID", "USER_ID", "APP_ID"})
 RESERVED_ENV_PREFIXES = ("ARA_", "MODAL_")
 logger = logging.getLogger(__name__)
@@ -99,6 +100,16 @@ def _normalize_secret_name(name: str) -> str:
     normalized = str(name or "").strip().lower()
     if not normalized or not SECRET_NAME_RE.match(normalized):
         raise ValueError("Secret name must match [a-z0-9][a-z0-9_-]{0,62}[a-z0-9]")
+    return normalized
+
+
+def _normalize_project_name(project_name: str) -> str:
+    normalized = str(project_name or "").strip()
+    if not normalized or not PROJECT_NAME_RE.match(normalized):
+        raise ValueError(
+            "project_name must match [a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])? "
+            "(lowercase letters, digits, hyphens only; no underscores)"
+        )
     return normalized
 
 
@@ -222,7 +233,7 @@ def _extract_callable_source(fn: Callable[..., Any], *, context: str) -> str:
     return source
 
 
-def _validate_prompt_factory_signature(fn: Callable[..., Any]) -> None:
+def _validate_agent_prompt_signature(fn: Callable[..., Any]) -> None:
     signature = inspect.signature(fn)
     params = [
         p
@@ -230,14 +241,14 @@ def _validate_prompt_factory_signature(fn: Callable[..., Any]) -> None:
         if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
     ]
     if len(params) != 1:
-        raise ValueError("@app.agent(prompt_factory=True) requires exactly one input parameter")
+        raise ValueError("@app.agent requires exactly one input parameter")
     return_annotation = signature.return_annotation
     if isinstance(return_annotation, str):
         normalized = return_annotation.strip().strip("'\"").lower()
         if normalized in {"str", "builtins.str"}:
             return
     if return_annotation not in (inspect._empty, str):
-        raise ValueError("@app.agent(prompt_factory=True) return annotation must be str (or omitted)")
+        raise ValueError("@app.agent return annotation must be str (or omitted)")
 
 
 class SecretDefinition:
@@ -336,29 +347,6 @@ class SecretDefinition:
         resolved_name = _normalize_secret_name(name) if name is not None else _generated_secret_name("dotenv", values)
         return cls(resolved_name, values=values, required_keys=required_keys, source="dotenv")
 
-    @classmethod
-    def from_local_environ(
-        cls,
-        name: str,
-        env_keys: list[str],
-        *,
-        required_keys: Optional[list[str]] = None,
-    ) -> "SecretDefinition":
-        if not isinstance(env_keys, list) or not env_keys:
-            raise ValueError("from_local_environ requires a non-empty env_keys list")
-        values: dict[str, str] = {}
-        missing: list[str] = []
-        for raw_key in env_keys:
-            key = _validate_env_key(raw_key)
-            value = os.getenv(key)
-            if value is None:
-                missing.append(key)
-                continue
-            values[key] = str(value)
-        if missing:
-            raise ValueError(f"Missing environment variables for secret {name}: {', '.join(missing)}")
-        return cls(name, values=values, required_keys=required_keys, source="local_environ")
-
     def ref(self) -> dict[str, Any]:
         out = {"name": self.name}
         if self.required_keys:
@@ -394,15 +382,6 @@ class Secret:
         required_keys: Optional[list[str]] = None,
     ) -> SecretDefinition:
         return SecretDefinition.from_dotenv(name, filename=filename, required_keys=required_keys)
-
-    @staticmethod
-    def from_local_environ(
-        name: str,
-        env_keys: list[str],
-        *,
-        required_keys: Optional[list[str]] = None,
-    ) -> SecretDefinition:
-        return SecretDefinition.from_local_environ(name, env_keys=env_keys, required_keys=required_keys)
 
 
 def _normalize_runtime_env_map(raw_env: Optional[dict[str, Any]]) -> dict[str, str]:
@@ -884,24 +863,15 @@ class App:
 
     def __init__(
         self,
-        name: str,
+        project_name: str,
         *,
-        slug: Optional[str] = None,
-        project_name: Optional[str] = None,
-        description: str = "",
         interfaces: Optional[dict[str, Any]] = None,
         runtime_profile: Optional[dict[str, Any]] = None,
         agent: Optional[dict[str, Any]] = None,
     ):
-        self.name = str(name or "").strip()
-        self.project_name = str(project_name or "").strip()
-        source = self.project_name or slug or self.name
-        self.slug = _slugify(source)
-        if not self.name:
-            raise ValueError("App(name=...) requires a non-empty name")
-        if not self.slug:
-            raise ValueError("App(...) could not derive a slug")
-        self.description = str(description or "").strip()
+        self.project_name = _normalize_project_name(project_name)
+        self.name = self.project_name
+        self.slug = self.project_name
         self._agent = dict(agent or {})
         self._interfaces = dict(interfaces or {})
         self._runtime_profile = dict(runtime_profile or {})
@@ -944,9 +914,6 @@ class App:
         self,
         id: Optional[str] = None,
         *,
-        task: str = "",
-        instructions: str = "",
-        prompt_factory: bool = False,
         entrypoint: bool = False,
         skills: Optional[list[str]] = None,
         schedules: Optional[list[dict[str, Any]]] = None,
@@ -956,24 +923,22 @@ class App:
         always_on: bool = True,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-            agent_id = str(id or _slugify(fn.__name__.replace("_", "-"))).strip()
+            agent_id = str(id or fn.__name__).strip()
             if not agent_id:
                 raise ValueError("@app.agent requires a non-empty id")
-            task_text = str(task or instructions or fn.__doc__ or "").strip() or f"Run agent {agent_id}"
-            instructions_text = str(instructions or task_text).strip()
-            prompt_factory_spec: Optional[dict[str, Any]] = None
-            if prompt_factory:
-                _validate_prompt_factory_signature(fn)
-                source = _extract_callable_source(fn, context="@app.agent(prompt_factory=True)")
-                params_schema = _callable_parameters_schema(fn)
-                prompt_factory_spec = {
-                    "function_name": fn.__name__,
-                    "source": source,
-                    "parameters": params_schema,
-                }
-                if not str(task or "").strip() and not str(instructions or "").strip():
-                    task_text = f"Generate instructions at runtime via prompt factory '{fn.__name__}'."
-                    instructions_text = task_text
+            _validate_agent_prompt_signature(fn)
+            source = _extract_callable_source(fn, context="@app.agent")
+            params_schema = _callable_parameters_schema(fn)
+            prompt_factory_spec = {
+                "function_name": fn.__name__,
+                "source": source,
+                "parameters": params_schema,
+            }
+            instructions_text = (
+                str(fn.__doc__ or "").strip()
+                or f"Generate instructions at runtime via agent function '{fn.__name__}'."
+            )
+            task_text = instructions_text
             normalized_schedules: list[dict[str, Any]] = []
             for schedule_item in schedules or []:
                 normalized_schedules.append(_normalize_schedule_spec(schedule_item))
@@ -987,8 +952,7 @@ class App:
                 "always_on": bool(always_on),
                 "entrypoint": bool(entrypoint),
             }
-            if prompt_factory_spec is not None:
-                agent_row["prompt_factory"] = prompt_factory_spec
+            agent_row["prompt_factory"] = prompt_factory_spec
             if skills is not None:
                 agent_row["skills"] = _normalize_string_items(skills)
             if isinstance(runtime, dict) and runtime:
@@ -1009,11 +973,10 @@ class App:
         self,
         *,
         id: Optional[str] = None,
-        description: str = "",
         parameters: Optional[dict[str, Any]] = None,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-            tool_id = str(id or _slugify(fn.__name__.replace("_", "-"))).strip()
+            tool_id = str(id or fn.__name__).strip()
             if not tool_id:
                 raise ValueError("@app.tool requires a non-empty id")
             try:
@@ -1024,7 +987,7 @@ class App:
             if not source.startswith("def "):
                 raise ValueError("@app.tool only supports standard def functions")
             params_schema = dict(parameters) if isinstance(parameters, dict) else _callable_parameters_schema(fn)
-            tool_description = str(description or fn.__doc__ or "").strip()
+            tool_description = str(fn.__doc__ or "").strip()
             item = {
                 "type": "function",
                 "function": {
@@ -1142,7 +1105,7 @@ class App:
         return {
             "name": self.name,
             "slug": self.slug,
-            "description": self.description,
+            "description": "",
             "agent": agent,
             "workflows": workflows,
             "interfaces": dict(self._interfaces),
@@ -2020,7 +1983,15 @@ class AraClient:
                 payload["status"] = "active"
             self.http.update_app(app_id, payload)
         else:
-            created = self.http.create_app({**payload, "slug": self.manifest.get("slug")})
+            try:
+                created = self.http.create_app({**payload, "slug": self.manifest.get("slug")})
+            except RuntimeError as exc:
+                if "POST /apps failed (409)" in str(exc):
+                    raise RuntimeError(
+                        "Project name is already taken. Choose a different DNS-safe project_name "
+                        "(lowercase letters, digits, hyphens) and retry deploy."
+                    ) from None
+                raise
             app_id = str((created.get("app") or {}).get("id") or "")
             if not app_id:
                 raise RuntimeError("deploy failed: missing app id")
@@ -2824,7 +2795,7 @@ def run_auth_cli(argv: Optional[list[str]] = None) -> None:
     )
 
 
-def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, default_command: str = "deploy") -> None:
+def _run_app_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, default_command: str = "deploy") -> None:
     app_obj = app if isinstance(app, App) else None
     manifest = app_obj.manifest if app_obj is not None else dict(app)
 

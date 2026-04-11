@@ -5,8 +5,7 @@ from ara_sdk import App, Secret, runtime
 
 def build_app(*, dotenv_file: str, local_openai_key: str) -> App:
     app = App(
-        "Programmatic Secrets Redeploy Probe",
-        project_name="sdk-secret-reconcile-probe",
+        "sdk-secret-reconcile-probe",
         runtime_profile=runtime(
             secrets=[
                 Secret.from_dotenv(filename=dotenv_file),
@@ -16,11 +15,10 @@ def build_app(*, dotenv_file: str, local_openai_key: str) -> App:
     )
 
     @app.agent(
-        id="probe-agent",
         entrypoint=True,
-        task="Respond with a short probe confirmation.",
     )
-    def probe_agent():
+    def probe_agent(payload: dict) -> str:
         """Probe entrypoint for redeploy validation."""
+        return "Respond with a short probe confirmation."
 
     return app

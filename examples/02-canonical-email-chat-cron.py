@@ -11,23 +11,19 @@ from ara_sdk import App, Secret, runtime
 from dotenv import load_dotenv
 
 ROOT = pathlib.Path(__file__).resolve().parent
-DEFAULT_CHAT_AGENT_ID = "demo-chat"
 
 load_dotenv(ROOT / ".env.local", override=False)
 
-CHAT_AGENT_ID = (
-    os.getenv("ARA_DEMO_CHAT_AGENT_ID", "").strip()
-    or os.getenv("ARA_DEMO_CHAT_WORKFLOW_ID", "").strip()
-    or DEFAULT_CHAT_AGENT_ID
-)
+
+def _required_env_value(key: str) -> str:
+    value = str(os.getenv(key) or "").strip()
+    if not value:
+        raise ValueError(f"Missing required environment variable: {key}")
+    return value
+
 
 app = App(
-    "Canonical Email + Cron Demo",
-    project_name=os.getenv("ARA_DEMO_APP_SLUG", "canonical-email-chat-cron-demo"),
-    description=(
-        "Minimal Ara app for chat-driven email sending and recurring automation scheduling. "
-        "Email delivery is deterministic via a Python send_email tool backed by Resend."
-    ),
+    os.getenv("ARA_DEMO_APP_SLUG", "canonical-email-chat-cron-demo"),
     interfaces={
         # Keep this OFF for isolation. Enabling it lets app sessions use owner-authenticated
         # connector tools, which can unintentionally expose owner credentials to chat sessions.
@@ -36,9 +32,12 @@ app = App(
     },
     runtime_profile=runtime(
         secrets=[
-            Secret.from_local_environ(
+            Secret.from_dict(
                 "resend-runtime",
-                env_keys=["RESEND_API_KEY", "CRON_EMAIL_FROM"],
+                {
+                    "RESEND_API_KEY": _required_env_value("RESEND_API_KEY"),
+                    "CRON_EMAIL_FROM": _required_env_value("CRON_EMAIL_FROM"),
+                },
                 required_keys=["RESEND_API_KEY", "CRON_EMAIL_FROM"],
             ),
         ],
@@ -54,8 +53,9 @@ def _looks_like_email(value: str) -> bool:
     return re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", candidate) is not None
 
 
-@app.tool(id="send_email", description="Send one email via Resend API.")
+@app.tool()
 def send_email(to: str, subject: str, body: str) -> dict:
+    """Send one email via Resend API."""
     api_key = (os.getenv("RESEND_API_KEY") or "").strip()
     sender = (os.getenv("CRON_EMAIL_FROM") or "").strip()
     recipient = (to or "").strip()
@@ -97,9 +97,7 @@ def send_email(to: str, subject: str, body: str) -> dict:
 
 
 @app.agent(
-    id=CHAT_AGENT_ID,
     entrypoint=True,
-    prompt_factory=True,
     skills=[
         "send_email",
         "automation_create",

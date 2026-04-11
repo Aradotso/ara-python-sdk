@@ -1,16 +1,12 @@
 from ara_sdk import App, git_artifact, langgraph_adapter, sandbox
 
 app = App(
-    "Framework Adapter Minimal (LangGraph)",
-    project_name="framework-adapter-minimal-langgraph",
-    description="Minimal agent example using langgraph_adapter.",
+    "framework-adapter-minimal-langgraph",
 )
 
 
 @app.agent(
-    id="message-router",
     entrypoint=True,
-    prompt_factory=True,
     sandbox=sandbox(max_concurrency=2),
     runtime={
         "adapter": langgraph_adapter(

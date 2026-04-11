@@ -65,7 +65,7 @@ def _extract_run_id(response: dict[str, Any]) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Submit async Ara run with webhook callback over ngrok, then poll status.")
-    parser.add_argument("--workflow", default="demo-agent")
+    parser.add_argument("--agent", default="demo_agent")
     parser.add_argument("--message", default="Hello from async ngrok webhook example.")
     parser.add_argument("--input", action="append", default=[])
     parser.add_argument("--callback-path", default="/callback")
@@ -98,7 +98,7 @@ def main() -> None:
         callback["secret"] = args.callback_secret
 
     submit = client.run_async(
-        agent_id=args.workflow,
+        agent_id=args.agent,
         input_payload=input_payload,
         response_mode="webhook",
         callback=callback,

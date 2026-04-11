@@ -5,13 +5,13 @@ import pytest
 from ara_sdk import __main__ as sdk_main
 
 
-def test_standalone_cli_dispatches_command_to_run_cli(tmp_path, monkeypatch):
+def test_standalone_cli_dispatches_command_to_internal_app_cli(tmp_path, monkeypatch):
     script = tmp_path / "app.py"
     script.write_text(
         "\n".join(
             [
                 "from ara_sdk import App",
-                "app = App('Standalone CLI Probe', project_name='standalone-cli-probe')",
+                "app = App('standalone-cli-probe')",
             ]
         )
         + "\n",
@@ -20,12 +20,12 @@ def test_standalone_cli_dispatches_command_to_run_cli(tmp_path, monkeypatch):
 
     captured: dict[str, object] = {}
 
-    def _run_cli(app, argv=None, *, default_command="deploy"):
+    def _run_app_cli(app, argv=None, *, default_command="deploy"):
         captured["app_name"] = getattr(app, "name", "")
         captured["argv"] = list(argv or [])
         captured["default_command"] = default_command
 
-    monkeypatch.setattr(sdk_main, "run_cli", _run_cli)
+    monkeypatch.setattr(sdk_main, "_run_app_cli", _run_app_cli)
     monkeypatch.setattr(
         sdk_main.sys,
         "argv",
@@ -34,7 +34,7 @@ def test_standalone_cli_dispatches_command_to_run_cli(tmp_path, monkeypatch):
 
     sdk_main.main()
 
-    assert captured["app_name"] == "Standalone CLI Probe"
+    assert captured["app_name"] == "standalone-cli-probe"
     assert captured["argv"] == ["deploy", "--warm", "false"]
     assert captured["default_command"] == "deploy"
 
@@ -54,6 +54,47 @@ def test_standalone_cli_help_lists_top_level_commands(monkeypatch, capsys):
     assert "App commands (require <app_script.py>):" in out
     assert "auth      login/whoami/logout for CLI auth" in out
     assert "runtime   runtime capabilities, tools, skills, and control APIs" in out
+
+
+def test_standalone_cli_invalid_project_name_shows_dns_hint(tmp_path, monkeypatch):
+    script = tmp_path / "bad_app.py"
+    script.write_text(
+        "\n".join(
+            [
+                "from ara_sdk import App",
+                "app = App('Bad_Name')",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        sdk_main.sys,
+        "argv",
+        ["ara", "deploy", str(script)],
+    )
+
+    with pytest.raises(SystemExit, match=r"Invalid App project_name"):
+        sdk_main.main()
+
+
+def test_standalone_cli_reraises_non_project_name_value_errors(tmp_path, monkeypatch):
+    script = tmp_path / "bad_app.py"
+    script.write_text("app = object()\n", encoding="utf-8")
+
+    def _raise_unrelated_value_error(_path):
+        raise ValueError("bad secret config")
+
+    monkeypatch.setattr(sdk_main, "_load_module", _raise_unrelated_value_error)
+    monkeypatch.setattr(
+        sdk_main.sys,
+        "argv",
+        ["ara", "deploy", str(script)],
+    )
+
+    with pytest.raises(ValueError, match=r"bad secret config"):
+        sdk_main.main()
 
 
 def test_runtime_cli_dispatches_without_app_script(monkeypatch):

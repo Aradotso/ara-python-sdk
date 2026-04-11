@@ -16,12 +16,7 @@ SCRIPT_SOURCE_FILE = ROOT / "assets" / "01-b-agent-skills-loading-title_case.py"
 SCRIPT_PATH = "scripts/title_case.py"
 
 app = App(
-    "Ara Skill Pattern 02 (Script Referenced)",
-    project_name="skill-script-v1",
-    description=(
-        "Minimal Ara SDK app that uploads a script into runtime files "
-        "and instructs the agent to execute it by path."
-    ),
+    "skill-script-v1",
     runtime_profile=runtime(
         files=[
             local_file(
@@ -35,10 +30,8 @@ app = App(
 
 
 @app.agent(
-    id="title-case-runtime-file-agent",
     entrypoint=True,
     # Path discovery is required because app files are mounted under app-id scoped runtime roots.
-    prompt_factory=True,
     skills=["bash"],
 )
 def title_case_agent(payload: dict) -> str:

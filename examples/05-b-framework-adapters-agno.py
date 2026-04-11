@@ -1,16 +1,12 @@
 from ara_sdk import App, agno_adapter, sandbox, tarball_artifact
 
 app = App(
-    "Framework Adapter Minimal (Agno)",
-    project_name="framework-adapter-minimal-agno",
-    description="Minimal agent example using agno_adapter.",
+    "framework-adapter-minimal-agno",
 )
 
 
 @app.agent(
-    id="followup-writer",
     entrypoint=True,
-    prompt_factory=True,
     sandbox=sandbox(max_concurrency=1),
     runtime={
         "adapter": agno_adapter(

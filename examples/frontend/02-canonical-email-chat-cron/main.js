@@ -3,7 +3,7 @@ const FIXED_API_BASE_URL = "https://api.ara.so";
 const defaults = {
   appId: import.meta.env.VITE_ARA_APP_ID || "",
   runtimeKey: import.meta.env.VITE_ARA_RUNTIME_KEY || "",
-  agentId: import.meta.env.VITE_ARA_CHAT_AGENT_ID || "demo-chat",
+  agentId: import.meta.env.VITE_ARA_CHAT_AGENT_ID || "demo_chat",
   extraInput: import.meta.env.VITE_ARA_EXTRA_INPUT_JSON || "",
 };
 

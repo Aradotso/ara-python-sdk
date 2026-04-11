@@ -107,7 +107,7 @@ def test_example_manifests_smoke() -> None:
     inline_mod = _load_example_module("skill_inline_example", "01-a-agent-skills-loading.py")
     inline_manifest = inline_mod.app.manifest
     inline_agents = inline_manifest["agent"]["agents"]
-    assert inline_agents[0]["id"] == "title-case-inline-instructions-agent"
+    assert inline_agents[0]["id"] == "title_case_agent"
     assert "prompt_factory" in inline_agents[0]
 
     script_mod = _load_example_module("skill_script_example", "01-b-agent-skills-loading.py")
@@ -133,19 +133,19 @@ def test_live_reliability_probe_three_of_three() -> None:
     cases = [
         {
             "file": "01-a-agent-skills-loading.py",
-            "agent": "title-case-inline-instructions-agent",
+            "agent": "title_case_agent",
             "probe_expected": "PROBE:inline-ok:Hello From Ara Sdk",
             "normal_expected": "Hello From Ara Sdk",
         },
         {
             "file": "01-b-agent-skills-loading.py",
-            "agent": "title-case-runtime-file-agent",
+            "agent": "title_case_agent",
             "probe_expected": "PROBE:script-ok:Hello From Ara Sdk",
             "normal_expected": "Hello From Ara Sdk",
         },
         {
             "file": "01-c-agent-skills-loading.py",
-            "agent": "title-case-decorator-agent",
+            "agent": "title_case_agent",
             "probe_expected": "PROBE:decorator-ok:Hello From Ara Sdk",
             "normal_expected": "Hello From Ara Sdk",
         },

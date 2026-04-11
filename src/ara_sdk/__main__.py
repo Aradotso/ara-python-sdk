@@ -5,7 +5,7 @@ import pathlib
 import sys
 from types import ModuleType
 
-from .core import App, run_auth_cli, run_cli, run_runtime_cli
+from .core import App, _run_app_cli, run_auth_cli, run_runtime_cli
 
 
 def _print_help(bin_name: str) -> None:
@@ -23,7 +23,7 @@ def _print_help(bin_name: str) -> None:
                 "",
                 "Examples:",
                 f"  {bin_name} deploy app.py",
-                f"  {bin_name} run app.py --agent booking-coordinator --message \"hello\"",
+                f"  {bin_name} run app.py --agent booking_coordinator --message \"hello\"",
                 f"  {bin_name} auth login",
                 f"  {bin_name} runtime capabilities --session sess-123",
                 "",
@@ -43,6 +43,17 @@ def _load_module(path: pathlib.Path) -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _format_project_name_hint(raw_error: str) -> str:
+    if "project_name must match" not in raw_error:
+        return raw_error
+    return (
+        "Invalid App project_name.\n"
+        "Use DNS-safe project names with lowercase letters, digits, and hyphens only.\n"
+        "Allowed pattern: [a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\n"
+        "Example: my-app-1"
+    )
 
 
 def _discover_app(module: ModuleType) -> App:
@@ -75,9 +86,15 @@ def main() -> None:
     script = pathlib.Path(sys.argv[2]).expanduser().resolve()
     if not script.exists():
         raise SystemExit(f"Script not found: {script}")
-    module = _load_module(script)
+    try:
+        module = _load_module(script)
+    except ValueError as exc:
+        hint = _format_project_name_hint(str(exc))
+        if hint == str(exc):
+            raise
+        raise SystemExit(hint) from None
     app = _discover_app(module)
-    run_cli(app, argv=[command, *sys.argv[3:]], default_command=command)
+    _run_app_cli(app, argv=[command, *sys.argv[3:]], default_command=command)
 
 
 if __name__ == "__main__":

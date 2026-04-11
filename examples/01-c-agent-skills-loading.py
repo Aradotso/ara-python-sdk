@@ -12,17 +12,13 @@ for parent in pathlib.Path(__file__).resolve().parents:
 from ara_sdk import App
 
 app = App(
-    "Ara Skill Pattern 03 (Decorator Handler)",
-    project_name="skill-decorator-v1",
-    description="Minimal Ara SDK app: skill dispatch is implemented via a Python decorator registry.",
+    "skill-decorator-v1",
 )
 
 
-@app.tool(
-    id="title_case_decorator",
-    description="Convert input text by dispatching to the decorator-registered title-case handler.",
-)
+@app.tool()
 def title_case_decorator(text: str) -> dict:
+    """Convert input text via the decorator-registered title-case handler."""
     # Keep registry + decorator local to the tool function because ara_sdk stores
     # and executes function source for runtime tools; module globals are not guaranteed.
     handlers: dict[str, callable] = {}
@@ -53,9 +49,7 @@ def title_case_decorator(text: str) -> dict:
 
 
 @app.agent(
-    id="title-case-decorator-agent",
     entrypoint=True,
-    prompt_factory=True,
     skills=["title_case_decorator"],
 )
 def title_case_agent(payload: dict) -> str:

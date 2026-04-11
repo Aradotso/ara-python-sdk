@@ -9,17 +9,28 @@ from ara_sdk import App, Secret, invoke, runtime, sandbox, schedule, scheduler
 from ara_sdk import core
 
 
-def test_app_manifest_project_name_slug_priority():
-    app = App(name="Investor Booker", project_name="Team Internal App")
+def test_app_uses_project_name_for_name_and_slug():
+    app = App("team-internal-app")
+    assert app.name == "team-internal-app"
     assert app.slug == "team-internal-app"
 
 
+def test_app_accepts_project_name_keyword_argument():
+    app = App(project_name="team-internal-app")
+    assert app.name == "team-internal-app"
+    assert app.slug == "team-internal-app"
+
+
+def test_app_rejects_non_dns_safe_project_name():
+    with pytest.raises(ValueError, match="project_name must match"):
+        App("Team_Internal_App")
+
+
 def test_agent_registers_profile_and_workflow():
-    app = App(name="Test App")
+    app = App("test-app")
 
     @app.agent(
         id="booking-coordinator",
-        task="Coordinate booking tasks.",
         entrypoint=True,
         skills=["send_email", "automation_create"],
         schedules=[
@@ -33,8 +44,9 @@ def test_agent_registers_profile_and_workflow():
         runtime=runtime(memory_mb=1024),
         sandbox=sandbox(max_concurrency=3),
     )
-    def booking():
+    def booking(payload: dict) -> str:
         """Coordinate booking agent workflows."""
+        return "Coordinate booking tasks."
 
     manifest = app.manifest
     agents = manifest["agent"]["agents"]
@@ -53,18 +65,18 @@ def test_agent_registers_profile_and_workflow():
 
 
 def test_agent_omits_skills_when_unspecified_and_strips_runtime_secret_defs():
-    app = App(name="No Skills Agent App")
+    app = App("no-skills-agent-app")
     agent_runtime = runtime(
         secrets=[Secret.from_dict("provider-local", {"OPENAI_API_KEY": "sk-test"})],
     )
 
     @app.agent(
         id="general-agent",
-        task="Handle generic requests.",
         runtime=agent_runtime,
     )
-    def general_agent():
+    def general_agent(payload: dict) -> str:
         """General agent."""
+        return "Handle generic requests."
 
     manifest = app.manifest
     agents = manifest["agent"]["agents"]
@@ -77,8 +89,30 @@ def test_agent_omits_skills_when_unspecified_and_strips_runtime_secret_defs():
     assert "__secret_definitions" not in subagents[0]["runtime"]
 
 
+def test_agent_uses_exact_function_name_when_id_omitted():
+    app = App("implicit-agent-id-app")
+
+    @app.agent(entrypoint=True)
+    def title_case_agent(payload: dict) -> str:
+        return "Return title case instructions."
+
+    agents = app.manifest["agent"]["agents"]
+    assert agents[0]["id"] == "title_case_agent"
+
+
+def test_agent_rejects_removed_legacy_kwargs():
+    app = App("legacy-agent-args-app")
+
+    with pytest.raises(TypeError):
+        app.agent(id="legacy-agent", task="legacy")
+    with pytest.raises(TypeError):
+        app.agent(id="legacy-agent", instructions="legacy")
+    with pytest.raises(TypeError):
+        app.agent(id="legacy-agent", prompt_factory=True)
+
+
 def _load_module_from_path(path) -> ModuleType:
-    spec = importlib.util.spec_from_file_location("future_prompt_factory_module", str(path))
+    spec = importlib.util.spec_from_file_location("future_agent_module", str(path))
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -86,17 +120,17 @@ def _load_module_from_path(path) -> ModuleType:
     return module
 
 
-def test_prompt_factory_accepts_postponed_str_return_annotation(tmp_path):
-    module_path = tmp_path / "future_prompt_factory_module.py"
+def test_agent_accepts_postponed_str_return_annotation(tmp_path):
+    module_path = tmp_path / "future_agent_module.py"
     module_path.write_text(
         """
 from __future__ import annotations
 
 from ara_sdk import App
 
-app = App(name="Future Prompt Factory")
+app = App("future-agent")
 
-@app.agent(id="future-agent", prompt_factory=True)
+@app.agent(id="future-agent")
 def future_agent(payload: dict) -> str:
     return "Build instructions from payload."
 """.strip()
@@ -112,33 +146,45 @@ def future_agent(payload: dict) -> str:
 
 
 def test_tool_manifest_shape():
-    app = App(name="Tooling App")
+    app = App("tooling-app")
 
     def send_email(to: str, subject: str, body: str) -> dict:
         """Send an email payload."""
         return {"ok": True, "to": to, "subject": subject, "body": body}
 
-    app.tool(id="send_email", description="Send email via tool.")(send_email)
+    app.tool()(send_email)
 
     manifest = app.manifest
     tools = manifest["agent"]["tools"]
 
     assert tools[0]["type"] == "function"
     assert tools[0]["function"]["name"] == "send_email"
-    assert tools[0]["function"]["description"] == "Send email via tool."
+    assert tools[0]["function"]["description"] == "Send an email payload."
     assert tools[0]["function"]["parameters"]["properties"]["subject"]["type"] == "string"
     assert tools[0]["function_name"] == "send_email"
     assert tools[0]["source"].startswith("def send_email")
 
 
+def test_tool_uses_exact_function_name_when_id_omitted():
+    app = App("tooling-app")
+
+    @app.tool()
+    def title_case_decorator(text: str):
+        """Title-case helper."""
+        return {"ok": True, "result": text.title()}
+
+    tools = app.manifest["agent"]["tools"]
+    assert tools[0]["function"]["name"] == "title_case_decorator"
+
+
 def test_tool_supports_multiline_decorator_arguments():
-    app = App(name="Tooling App")
+    app = App("tooling-app")
 
     @app.tool(
         id="send_email",
-        description="Send an email payload.",
     )
     def send_email(to: str):
+        """Send an email payload."""
         return {"ok": True, "to": to}
 
     tools = app.manifest["agent"]["tools"]
@@ -341,7 +387,7 @@ def test_secret_rejects_reserved_keys():
         Secret.from_dict("provider-local", {"ARA_INTERNAL_TOKEN": "abc"})
 
 
-def test_secret_from_dotenv_and_local_environ(tmp_path, monkeypatch):
+def test_secret_from_dotenv_and_dict(tmp_path):
     dotenv = tmp_path / ".env.secrets"
     dotenv.write_text("OPENAI_API_KEY=sk-123\nANTHROPIC_API_KEY=an-123\n", encoding="utf-8")
     auto_secret = Secret.from_dotenv(filename=str(dotenv))
@@ -362,9 +408,8 @@ def test_secret_from_dotenv_and_local_environ(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="conflicts with name= keyword"):
         Secret.from_dict("provider-local", {"FOO": "bar"}, name="provider-other")
 
-    monkeypatch.setenv("CAL_API_KEY", "cal-123")
-    env_secret = Secret.from_local_environ("calendar", env_keys=["CAL_API_KEY"])
-    assert env_secret.values == {"CAL_API_KEY": "cal-123"}
+    explicit_dict_secret = Secret.from_dict("calendar", {"CAL_API_KEY": "cal-123"})
+    assert explicit_dict_secret.values == {"CAL_API_KEY": "cal-123"}
 
 
 def test_secret_name_requires_two_or_more_characters():
@@ -576,6 +621,27 @@ def test_deploy_surfaces_backend_secrets_route_compat_error(tmp_path):
 
     client.http = _CompatHttp()
     with pytest.raises(RuntimeError, match="does not support App SDK secret routes"):
+        client.deploy()
+
+
+def test_deploy_surfaces_project_name_conflict_error(tmp_path):
+    client = core.AraClient(
+        manifest=_manifest_with_runtime(runtime_profile={}),
+        api_base_url="https://api.ara.so",
+        api_key="token",
+        cwd=tmp_path,
+    )
+
+    class _ConflictHttp(_FakeHttp):
+        def create_app(self, body: dict) -> dict:
+            _ = body
+            raise RuntimeError(
+                "POST /apps failed (409). "
+                "Response body hidden by default; set ARA_SDK_DEBUG_HTTP_ERRORS=true to include it."
+            )
+
+    client.http = _ConflictHttp()
+    with pytest.raises(RuntimeError, match="Project name is already taken"):
         client.deploy()
 
 
@@ -818,7 +884,7 @@ def test_cli_up_alias_dispatches_to_deploy(monkeypatch, capsys):
         classmethod(lambda cls, *, manifest, cwd=None: stub),
     )
 
-    core.run_cli(
+    core._run_app_cli(
         _manifest_with_runtime(runtime_profile={}),
         argv=["up", "--warm", "true"],
     )
@@ -850,7 +916,7 @@ def test_cli_setup_auth_dispatches_to_client(monkeypatch, capsys):
         "from_env",
         classmethod(lambda cls, *, manifest, cwd=None: stub),
     )
-    core.run_cli(
+    core._run_app_cli(
         _manifest_with_runtime(runtime_profile={}),
         argv=["setup-auth", "--x-key-name", "demo-x", "--x-key-rpm", "55", "--ensure-runtime-key", "true"],
     )
@@ -861,7 +927,7 @@ def test_cli_setup_auth_dispatches_to_client(monkeypatch, capsys):
 
 def test_cli_rejects_unknown_subcommand(capsys):
     with pytest.raises(SystemExit) as exc:
-        core.run_cli(_manifest_with_runtime(runtime_profile={}), argv=["not-a-command"])
+        core._run_app_cli(_manifest_with_runtime(runtime_profile={}), argv=["not-a-command"])
     assert exc.value.code == 2
     err = capsys.readouterr().err
     assert "invalid choice" in err
@@ -893,7 +959,7 @@ def test_cli_logs_streams_runtime_lines(monkeypatch, capsys):
         classmethod(lambda cls, *, manifest, cwd=None: stub),
     )
 
-    core.run_cli(
+    core._run_app_cli(
         _manifest_with_runtime(runtime_profile={}),
         argv=["logs"],
     )

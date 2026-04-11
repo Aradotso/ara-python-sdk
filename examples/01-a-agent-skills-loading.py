@@ -12,19 +12,12 @@ for parent in pathlib.Path(__file__).resolve().parents:
 from ara_sdk import App
 
 app = App(
-    "Ara Skill Pattern 01 (Inline Instructions)",
-    project_name="skill-inline-v1",
-    description=(
-        "Minimal Ara SDK app with no custom tool code. "
-        "Agent behavior is defined entirely by inline execution instructions in task text."
-    ),
+    "skill-inline-v1",
 )
 
 
 @app.agent(
-    id="title-case-inline-instructions-agent",
     entrypoint=True,
-    prompt_factory=True,
     skills=["bash"],
 )
 def title_case_agent(payload: dict) -> str:

@@ -1,16 +1,12 @@
 from ara_sdk import App, invoke, sandbox, schedule
 
 app = App(
-    "Meeting Booker",
-    project_name="meeting-booker",
-    description="Optional Cal.com-backed meeting booking flow.",
+    "meeting-booker",
 )
 
 
 @app.agent(
-    id="booking-coordinator",
     entrypoint=True,
-    prompt_factory=True,
     handoff_to=["calendar-strategist"],
     schedules=[
         schedule.cron(
@@ -18,7 +14,7 @@ app = App(
             expr="0 13 * * 1-5",
             timezone="UTC",
             run=invoke.agent(
-                "booking-coordinator",
+                "booking_coordinator",
                 input={
                     "action": "send-reminders",
                     "target": "pending-confirmations",
