@@ -2273,6 +2273,12 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
             "on_existing": args.on_existing,
         }
         deploy_out = client.deploy(**deploy_kwargs)
+        warmup_result = deploy_out.get("warmup") if isinstance(deploy_out, dict) else None
+        warmup_run_id = (
+            str(warmup_result.get("run_id") or "").strip()
+            if isinstance(warmup_result, dict)
+            else ""
+        )
         print(
             json.dumps(
                 {
@@ -2280,6 +2286,7 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
                     "slug": str(manifest.get("slug") or ""),
                     "runtime_key_created": bool(deploy_out.get("runtime_key_created")),
                     "runtime_key": str(deploy_out.get("runtime_key") or ""),
+                    "warmup_run_id": warmup_run_id,
                     "next": {
                         "setup_auth_command": "ara setup-auth app.py",
                     },
