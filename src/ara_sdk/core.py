@@ -2015,6 +2015,106 @@ class AraRuntimeClient:
             },
         )
 
+    def chat(
+        self,
+        *,
+        message: str,
+        model: str = "",
+        conversation_id: str = "",
+        timeout: int = 120,
+    ) -> dict[str, Any]:
+        """Send a message through the full agent loop (LLM + tools + memory).
+
+        Calls POST /chat (SSE) — the same code path as the Ara UI.
+        Parses the event stream and returns a structured result.
+
+        Returns::
+
+            {
+                "text": "final assistant response",
+                "tool_calls": [
+                    {"name": "read_file", "args": {"path": "..."}, "result": "..."},
+                ],
+                "reasoning": "...",
+            }
+        """
+        body: dict[str, Any] = {
+            "messages": [{"role": "user", "content": message}],
+        }
+        if model:
+            body["model"] = model
+        if conversation_id:
+            body["chatId"] = conversation_id
+
+        payload = json.dumps(body).encode("utf-8")
+        req_headers: dict[str, str] = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        }
+        if self.http.api_key:
+            req_headers["Authorization"] = f"Bearer {self.http.api_key}"
+
+        req = urllib.request.Request(
+            f"{self.http.base_url}/chat",
+            method="POST",
+            data=payload,
+            headers=req_headers,
+        )
+
+        text = ""
+        reasoning = ""
+        tool_calls: list[dict[str, Any]] = []
+        pending_tools: dict[str, dict[str, Any]] = {}
+
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line or line.startswith(":"):
+                        continue
+                    if line == "data: [DONE]":
+                        break
+                    if not line.startswith("data:"):
+                        continue
+                    data_str = line[len("data:"):].strip()
+                    if not data_str:
+                        continue
+                    try:
+                        event = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+
+                    etype = event.get("type", "")
+
+                    if etype == "text-delta":
+                        text += event.get("delta", "")
+                    elif etype == "reasoning-delta":
+                        reasoning += event.get("delta", "")
+                    elif etype == "tool-input-available":
+                        tc_id = event.get("toolCallId", "")
+                        entry = {
+                            "name": event.get("toolName", ""),
+                            "args": event.get("input", {}),
+                            "result": "",
+                        }
+                        pending_tools[tc_id] = entry
+                        tool_calls.append(entry)
+                    elif etype == "tool-output-available":
+                        tc_id = event.get("toolCallId", "")
+                        if tc_id in pending_tools:
+                            pending_tools[tc_id]["result"] = event.get("output", "")
+                    elif etype == "error":
+                        raise RuntimeError(event.get("errorText", "Agent error"))
+
+        except urllib.error.HTTPError as exc:
+            details = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"chat() failed ({exc.code}): {details}") from exc
+
+        result: dict[str, Any] = {"text": text, "tool_calls": tool_calls}
+        if reasoning:
+            result["reasoning"] = reasoning
+        return result
+
 
 def _parse_pairs(items: list[str]) -> dict[str, str]:
     out: dict[str, str] = {}
