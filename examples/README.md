@@ -71,7 +71,10 @@ python3 03-async-ngrok-webhook-run_async_ngrok.py --callback-secret demo-secret
 
 ```bash
 cd examples
-ara local 04-calcom-booking.py --input action="send-reminders"
+ara deploy 04-calcom-booking.py
+ara setup-auth 04-calcom-booking.py --ensure-runtime-key true
+# Use runtime_key returned by setup-auth output.
+ara run 04-calcom-booking.py --agent booking-coordinator --runtime-key "<runtime_key>" --input action="send-reminders"
 ```
 
 ## 05 - Framework Adapters
