@@ -69,6 +69,7 @@ export OPENAI_API_KEY="your_provider_key"
 ara deploy app.py
 ara setup-auth app.py
 ara run app.py --agent booking-coordinator --message "Need 3 slots next week"
+ara run app.py --agent booking-coordinator --input-json '{"request":"Need 3 slots next week","context":{"caller":"cli"}}'
 ara run-async app.py --agent booking-coordinator --message "Need 3 slots next week" --response-mode poll
 ara logs app.py
 ara events app.py --event-type channel.web.inbound --channel web --message "hello"
@@ -217,6 +218,37 @@ Use one schedule shape everywhere:
 - `schedule.cron(...)` / `schedule.every(...)` for static declarations on `@app.agent`
 - `invoke.agent(...)` / `invoke.tool(...)` for schedule targets
 - `scheduler.create(spec)` for dynamic runtime automation payloads
+
+## JSON runtime input contract
+
+Agent invocation input is JSON-first.
+
+- `invoke.agent(..., input=<json>)` now accepts any JSON-serializable payload.
+- The SDK does not enforce a fixed envelope shape; callers can pass any keys they want.
+- `python app.py run` and `python app.py run-async` support `--input-json` for direct JSON object input (inline string or `@path/to/file.json`).
+
+Example:
+
+```python
+from ara_sdk import invoke
+
+invoke.agent(
+    "title-case-agent",
+    input={
+        "text": "hello world",
+        "mode": "probe",
+        "context": {"caller_agent": "planner", "trace_id": "run_123"},
+    },
+)
+```
+
+## Prompt factory agent mode (optional)
+
+`@app.agent(..., prompt_factory=True)` records the agent function source in the manifest so runtimes can build per-run system instructions from JSON input.
+
+- Use this when you want the agent function body to compute the system prompt string.
+- If `task`/`instructions` are omitted, the SDK writes a default instruction note describing prompt-factory behavior.
+- Existing `task=` based apps remain fully supported.
 
 ## Examples
 

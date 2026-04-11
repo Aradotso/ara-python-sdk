@@ -99,14 +99,7 @@ def send_email(to: str, subject: str, body: str) -> dict:
 @app.agent(
     id=CHAT_AGENT_ID,
     entrypoint=True,
-    task=(
-        "You are a concise assistant in an active Ara cloud session. "
-        "Email delivery MUST use the send_email tool. "
-        "For recurring schedules, use automation_create/automation_list/automation_update/automation_delete. "
-        "For reliable recurring sends, prefer automation_create with execution_kind='app_tool_call', "
-        "tool_name='send_email', and tool_args {'to','subject','body'}. "
-        "Only claim success if tool output confirms it."
-    ),
+    prompt_factory=True,
     skills=[
         "send_email",
         "automation_create",
@@ -115,8 +108,26 @@ def send_email(to: str, subject: str, body: str) -> dict:
         "automation_delete",
     ],
 )
-def demo_chat():
-    """Respond to prompts, schedule automations, and send mail via Resend."""
+def demo_chat(payload: dict) -> str:
+    """Build chat instructions from JSON input payload."""
+    input_payload = payload if isinstance(payload, dict) else {}
+    intent = str(input_payload.get("intent") or "").strip().lower()
+    if intent == "schedule-recurring-email":
+        return """
+You are a concise assistant in an active Ara cloud session.
+For recurring schedules, use automation_create/automation_list/automation_update/automation_delete.
+Prefer automation_create with execution_kind='app_tool_call', tool_name='send_email',
+and tool_args {'to','subject','body'}.
+Only claim success if tool output confirms it.
+""".strip()
+    return """
+You are a concise assistant in an active Ara cloud session.
+Email delivery MUST use the send_email tool.
+For recurring schedules, use automation_create/automation_list/automation_update/automation_delete.
+For reliable recurring sends, prefer automation_create with execution_kind='app_tool_call',
+tool_name='send_email', and tool_args {'to','subject','body'}.
+Only claim success if tool output confirms it.
+""".strip()
 
 
 @app.local_entrypoint()

@@ -10,7 +10,7 @@ app = App(
 @app.agent(
     id="message-router",
     entrypoint=True,
-    task="Route incoming messages to the framework worker.",
+    prompt_factory=True,
     sandbox=sandbox(max_concurrency=2),
     runtime={
         "adapter": langgraph_adapter(
@@ -20,8 +20,17 @@ app = App(
         ),
     },
 )
-def message_router():
-    """Route inbound messages."""
+def message_router(payload: dict) -> str:
+    """Build runtime routing instructions from JSON input payload."""
+    input_payload = payload if isinstance(payload, dict) else {}
+    route = str(input_payload.get("route") or "").strip().lower()
+    if route:
+        return f"""
+Route incoming messages to the framework worker using route='{route}'.
+""".strip()
+    return """
+Route incoming messages to the framework worker.
+""".strip()
 
 
 @app.local_entrypoint()

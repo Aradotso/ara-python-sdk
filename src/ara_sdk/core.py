@@ -158,6 +158,13 @@ def _callable_parameters_schema(fn: Callable[..., Any]) -> dict[str, Any]:
     }
 
 
+def _ensure_json_serializable(value: Any, *, context: str) -> None:
+    try:
+        json.dumps(value)
+    except TypeError as exc:
+        raise ValueError(f"{context} must be JSON-serializable") from exc
+
+
 def _strip_leading_decorators(source: str) -> str:
     dedented = textwrap.dedent(source)
     try:
@@ -170,6 +177,35 @@ def _strip_leading_decorators(source: str) -> str:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             return "\n".join(lines[node.lineno - 1 :]).strip()
     return dedented.strip()
+
+
+def _extract_callable_source(fn: Callable[..., Any], *, context: str) -> str:
+    try:
+        raw_source = inspect.getsource(fn)
+    except (OSError, TypeError):
+        raise ValueError(f"{context} requires source-visible functions (no lambdas/dynamic defs)") from None
+    source = _strip_leading_decorators(raw_source)
+    if not source.startswith("def "):
+        raise ValueError(f"{context} only supports standard def functions")
+    return source
+
+
+def _validate_prompt_factory_signature(fn: Callable[..., Any]) -> None:
+    signature = inspect.signature(fn)
+    params = [
+        p
+        for p in signature.parameters.values()
+        if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    ]
+    if len(params) != 1:
+        raise ValueError("@app.agent(prompt_factory=True) requires exactly one input parameter")
+    return_annotation = signature.return_annotation
+    if isinstance(return_annotation, str):
+        normalized = return_annotation.strip().strip("'\"").lower()
+        if normalized in {"str", "builtins.str"}:
+            return
+    if return_annotation not in (inspect._empty, str):
+        raise ValueError("@app.agent(prompt_factory=True) return annotation must be str (or omitted)")
 
 
 class SecretDefinition:
@@ -733,8 +769,12 @@ def _normalize_schedule_run(run: Any) -> ScheduleRunSpec:
         agent_id = str(run.get("agent_id") or "").strip()
         if not agent_id:
             raise ValueError("invoke.agent(...) requires non-empty agent id")
-        input_payload = run.get("input") if isinstance(run.get("input"), dict) else {}
-        return {"type": "agent", "agent_id": agent_id, "input": dict(input_payload)}
+        normalized: ScheduleRunSpec = {"type": "agent", "agent_id": agent_id}
+        if "input" in run:
+            input_payload = run["input"]
+            _ensure_json_serializable(input_payload, context="invoke.agent(..., input=...)")
+            normalized["input"] = input_payload
+        return normalized
     if run_type == "tool":
         tool_name = str(run.get("tool_name") or run.get("tool") or "").strip()
         if not tool_name:
@@ -797,7 +837,7 @@ def _schedule_spec_to_automation_args(spec: Any) -> dict[str, Any]:
     if run["type"] == "agent":
         args["execution_kind"] = "app_agent_call"
         args["agent_id"] = run["agent_id"]
-        if run.get("input"):
+        if "input" in run and run["input"] is not None:
             args["input"] = run["input"]
     else:
         args["execution_kind"] = "app_tool_call"
@@ -875,6 +915,7 @@ class App:
         *,
         task: str = "",
         instructions: str = "",
+        prompt_factory: bool = False,
         entrypoint: bool = False,
         skills: Optional[list[str]] = None,
         schedules: Optional[list[dict[str, Any]]] = None,
@@ -889,6 +930,19 @@ class App:
                 raise ValueError("@app.agent requires a non-empty id")
             task_text = str(task or instructions or fn.__doc__ or "").strip() or f"Run agent {agent_id}"
             instructions_text = str(instructions or task_text).strip()
+            prompt_factory_spec: Optional[dict[str, Any]] = None
+            if prompt_factory:
+                _validate_prompt_factory_signature(fn)
+                source = _extract_callable_source(fn, context="@app.agent(prompt_factory=True)")
+                params_schema = _callable_parameters_schema(fn)
+                prompt_factory_spec = {
+                    "function_name": fn.__name__,
+                    "source": source,
+                    "parameters": params_schema,
+                }
+                if not str(task or "").strip() and not str(instructions or "").strip():
+                    task_text = f"Generate instructions at runtime via prompt factory '{fn.__name__}'."
+                    instructions_text = task_text
             normalized_schedules: list[dict[str, Any]] = []
             for schedule_item in schedules or []:
                 normalized_schedules.append(_normalize_schedule_spec(schedule_item))
@@ -902,6 +956,8 @@ class App:
                 "always_on": bool(always_on),
                 "entrypoint": bool(entrypoint),
             }
+            if prompt_factory_spec is not None:
+                agent_row["prompt_factory"] = prompt_factory_spec
             if skills is not None:
                 agent_row["skills"] = _normalize_string_items(skills)
             if isinstance(runtime, dict) and runtime:
@@ -1034,6 +1090,12 @@ class App:
                     schedule_run = normalized_schedule.get("run") if isinstance(normalized_schedule.get("run"), dict) else {}
                     schedule_run_type = str(schedule_run.get("type") or "").strip().lower()
                     run_agent_id = str(schedule_run.get("agent_id") or agent_id).strip() if schedule_run_type == "agent" else agent_id
+                    schedule_run_input = schedule_run.get("input")
+                    schedule_message = ""
+                    if isinstance(schedule_run_input, dict):
+                        schedule_message = str(schedule_run_input.get("message") or "").strip()
+                    elif isinstance(schedule_run_input, str):
+                        schedule_message = schedule_run_input.strip()
                     workflow_id = f"{agent_id}--{normalized_schedule['id']}"
                     trigger = {
                         "type": "cron",
@@ -1047,7 +1109,7 @@ class App:
                             {
                                 "id": run_agent_id,
                                 "task": schedule_task,
-                                "instructions": str(schedule_run.get("input", {}).get("message") or schedule_task).strip(),
+                                "instructions": str(schedule_message or schedule_task).strip(),
                             },
                             trigger=trigger,
                             workflow_id=workflow_id,
@@ -1078,15 +1140,18 @@ class App:
 
 class _Invoke:
     @staticmethod
-    def agent(agent_id: str, *, input: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    def agent(agent_id: str, *, input: Optional[Any] = None) -> dict[str, Any]:
         resolved_agent_id = str(agent_id or "").strip()
         if not resolved_agent_id:
             raise ValueError("invoke.agent(...) requires a non-empty agent_id")
-        return {
+        out: dict[str, Any] = {
             "type": "agent",
             "agent_id": resolved_agent_id,
-            "input": dict(input or {}),
         }
+        if input is not None:
+            _ensure_json_serializable(input, context="invoke.agent(..., input=...)")
+            out["input"] = input
+        return out
 
     @staticmethod
     def tool(tool_name: str, *, args: Optional[dict[str, Any]] = None) -> dict[str, Any]:
@@ -1970,6 +2035,24 @@ def _parse_pairs(items: list[str]) -> dict[str, str]:
     return out
 
 
+def _parse_json_object_arg(raw: str, *, flag_name: str) -> dict[str, Any]:
+    value = str(raw or "").strip()
+    if not value:
+        return {}
+    if value.startswith("@"):
+        path = pathlib.Path(value[1:]).expanduser()
+        if not path.exists():
+            raise RuntimeError(f"{flag_name} file not found: {path}")
+        value = path.read_text(encoding="utf-8")
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{flag_name} must be valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"{flag_name} must decode to a JSON object")
+    return parsed
+
+
 def _format_runtime_log_line(row: dict[str, Any]) -> str:
     timestamp = str(row.get("timestamp") or row.get("created_at") or "").strip()
     level = str(row.get("level") or "info").strip().upper() or "INFO"
@@ -2113,6 +2196,7 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
     p_run.add_argument("--agent", default="")
     p_run.add_argument("--message", default="")
     p_run.add_argument("--input", action="append", default=[])
+    p_run.add_argument("--input-json", default="")
     p_run.add_argument("--runtime-key", default="")
     p_run.add_argument("--app-header-key", default="")
 
@@ -2132,6 +2216,7 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
     p_run_async.add_argument("--agent", default="")
     p_run_async.add_argument("--message", default="")
     p_run_async.add_argument("--input", action="append", default=[])
+    p_run_async.add_argument("--input-json", default="")
     p_run_async.add_argument("--response-mode", choices=["poll", "webhook"], default="poll")
     p_run_async.add_argument("--callback-url", default="")
     p_run_async.add_argument("--callback-secret", default="")
@@ -2205,7 +2290,7 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
         return
 
     if command == "run":
-        payload = _parse_pairs(args.input)
+        payload = _parse_json_object_arg(args.input_json, flag_name="--input-json") if str(args.input_json).strip() else _parse_pairs(args.input)
         if args.message:
             payload["message"] = args.message
         run_id = str(payload.get("run_id") or "").strip() or _new_run_id()
@@ -2248,7 +2333,7 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
         return
 
     if command == "run-async":
-        payload = _parse_pairs(args.input)
+        payload = _parse_json_object_arg(args.input_json, flag_name="--input-json") if str(args.input_json).strip() else _parse_pairs(args.input)
         if args.message:
             payload["message"] = args.message
         run_id = str(args.run_id or "").strip() or _new_run_id()

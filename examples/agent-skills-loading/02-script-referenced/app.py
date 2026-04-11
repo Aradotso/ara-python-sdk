@@ -12,15 +12,13 @@ for parent in pathlib.Path(__file__).resolve().parents:
 
 from ara_sdk import App, local_file, runtime
 
-AGENT_ID = "title-case-runtime-file-agent"
-PROJECT_NAME = "skill-script-v1"
 ROOT = pathlib.Path(__file__).resolve().parent
 SCRIPT_SOURCE_FILE = ROOT / "scripts" / "title_case.py"
 SCRIPT_PATH = "scripts/title_case.py"
 
 app = App(
     "Ara Skill Pattern 02 (Script Referenced)",
-    project_name=PROJECT_NAME,
+    project_name="skill-script-v1",
     description=(
         "Minimal Ara SDK app that uploads a script into runtime files "
         "and instructs the agent to execute it by path."
@@ -38,41 +36,67 @@ app = App(
 
 
 @app.agent(
-    id=AGENT_ID,
+    id="title-case-runtime-file-agent",
     entrypoint=True,
     # Path discovery is required because app files are mounted under app-id scoped runtime roots.
-    task=(
-        "You are a file-backed title-case assistant. "
-        "A Python script is preloaded via runtime files at path 'scripts/title_case.py'. "
-        "Resolve the runtime file path with:\n\n"
-        "SCRIPT_PATH=\"$(python3 - <<'PY'\n"
-        "import glob\n"
-        f"paths = sorted(glob.glob('/root/.ara/workspace/.apps/*{PROJECT_NAME}*/scripts/title_case.py'))\n"
-        "print(paths[0] if paths else '')\n"
-        "PY\n"
-        ")\"\n\n"
-        "Then execute:\n\n"
-        "python3 \"$SCRIPT_PATH\" --text \"INPUT_TEXT\"\n\n"
-        "Default behavior: if the script command fails, immediately run this fallback:\n\n"
-        "python3 - <<'PY'\n"
-        "text = \"INPUT_TEXT\"\n"
-        "print(\" \".join(w[:1].upper() + w[1:].lower() for w in text.split()))\n"
-        "PY\n\n"
-        "If script execution is unavailable, still compute title case manually. "
-        "Do not apologize and do not describe failures. "
-        "In all cases, return only the transformed title-case text and no diagnostics.\n\n"
-        "Reliability probe mode (highest priority): if the user message starts with "
-        "'RELIABILITY_PROBE|', you MUST take the text after '|' as input and run the uploaded "
-        "script path flow above (no fallback). "
-        "If script execution succeeds, return exactly:\n"
-        "PROBE:script-ok:<Title Case Text>\n"
-        "If script execution fails, return exactly:\n"
-        "PROBE:script-fail"
-    ),
+    prompt_factory=True,
     skills=["bash"],
 )
-def title_case_agent():
-    """Agent that runs the uploaded runtime script by path."""
+def title_case_agent(payload: dict) -> str:
+    """Build runtime instructions from JSON input payload."""
+    input_payload = payload if isinstance(payload, dict) else {}
+    text = str(input_payload.get("text") or input_payload.get("message") or "").strip()
+    mode = str(input_payload.get("mode") or "").strip().lower()
+    probe_requested = mode == "probe" or text.startswith("RELIABILITY_PROBE|")
+    if probe_requested:
+        return """
+You are a file-backed title-case assistant.
+A Python script is preloaded via runtime files at path 'scripts/title_case.py'.
+Resolve the runtime file path with:
+
+SCRIPT_PATH="$(python3 - <<'PY'
+import glob
+paths = sorted(glob.glob('/root/.ara/workspace/.apps/*skill-script-v1*/scripts/title_case.py'))
+print(paths[0] if paths else '')
+PY
+)"
+
+Then execute:
+
+python3 "$SCRIPT_PATH" --text "INPUT_TEXT"
+
+Reliability probe mode: no fallback.
+If input starts with 'RELIABILITY_PROBE|', use only the text after '|' as INPUT_TEXT.
+If script execution succeeds, return exactly:
+PROBE:script-ok:<Title Case Text>
+If script execution fails, return exactly:
+PROBE:script-fail
+""".strip()
+    return """
+You are a file-backed title-case assistant.
+A Python script is preloaded via runtime files at path 'scripts/title_case.py'.
+Resolve the runtime file path with:
+
+SCRIPT_PATH="$(python3 - <<'PY'
+import glob
+paths = sorted(glob.glob('/root/.ara/workspace/.apps/*skill-script-v1*/scripts/title_case.py'))
+print(paths[0] if paths else '')
+PY
+)"
+
+Then execute:
+
+python3 "$SCRIPT_PATH" --text "INPUT_TEXT"
+
+If script execution fails, immediately run fallback:
+
+python3 - <<'PY'
+text = "INPUT_TEXT"
+print(" ".join(w[:1].upper() + w[1:].lower() for w in text.split()))
+PY
+
+Return only the transformed title-case text and no diagnostics.
+""".strip()
 
 
 @app.local_entrypoint()
@@ -82,7 +106,7 @@ def local(input_payload: dict[str, str]):
     return {
         "ok": True,
         "mode": "runtime-file-upload-reference",
-        "agent_id": AGENT_ID,
+        "agent_id": "title-case-runtime-file-agent",
         "input_text": resolved_text,
         "uploaded_script_path": SCRIPT_PATH,
         "source_file": str(SCRIPT_SOURCE_FILE),

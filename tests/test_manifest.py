@@ -1,5 +1,7 @@
+import importlib.util
 import io
 import os
+from types import ModuleType
 import urllib.error
 
 import pytest
@@ -74,6 +76,40 @@ def test_agent_omits_skills_when_unspecified_and_strips_runtime_secret_defs():
     assert "skills" not in profiles[0]
     assert "__secret_definitions" not in agents[0]["runtime"]
     assert "__secret_definitions" not in subagents[0]["runtime"]
+
+
+def _load_module_from_path(path) -> ModuleType:
+    spec = importlib.util.spec_from_file_location("future_prompt_factory_module", str(path))
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_prompt_factory_accepts_postponed_str_return_annotation(tmp_path):
+    module_path = tmp_path / "future_prompt_factory_module.py"
+    module_path.write_text(
+        """
+from __future__ import annotations
+
+from ara_sdk import App
+
+app = App(name="Future Prompt Factory")
+
+@app.agent(id="future-agent", prompt_factory=True)
+def future_agent(payload: dict) -> str:
+    return "Build instructions from payload."
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    module = _load_module_from_path(module_path)
+    manifest = module.app.manifest
+    agent_row = manifest["agent"]["agents"][0]
+    assert agent_row["id"] == "future-agent"
+    assert "prompt_factory" in agent_row
 
 
 def test_tool_manifest_shape():
