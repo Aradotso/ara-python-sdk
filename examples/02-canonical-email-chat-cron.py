@@ -54,8 +54,9 @@ def _looks_like_email(value: str) -> bool:
     return re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", candidate) is not None
 
 
-@app.tool(id="send_email", description="Send one email via Resend API.")
+@app.tool(id="send_email")
 def send_email(to: str, subject: str, body: str) -> dict:
+    """Send one email via Resend API."""
     api_key = (os.getenv("RESEND_API_KEY") or "").strip()
     sender = (os.getenv("CRON_EMAIL_FROM") or "").strip()
     recipient = (to or "").strip()

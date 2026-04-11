@@ -118,14 +118,14 @@ def test_tool_manifest_shape():
         """Send an email payload."""
         return {"ok": True, "to": to, "subject": subject, "body": body}
 
-    app.tool(id="send_email", description="Send email via tool.")(send_email)
+    app.tool(id="send_email")(send_email)
 
     manifest = app.manifest
     tools = manifest["agent"]["tools"]
 
     assert tools[0]["type"] == "function"
     assert tools[0]["function"]["name"] == "send_email"
-    assert tools[0]["function"]["description"] == "Send email via tool."
+    assert tools[0]["function"]["description"] == "Send an email payload."
     assert tools[0]["function"]["parameters"]["properties"]["subject"]["type"] == "string"
     assert tools[0]["function_name"] == "send_email"
     assert tools[0]["source"].startswith("def send_email")
@@ -136,9 +136,9 @@ def test_tool_supports_multiline_decorator_arguments():
 
     @app.tool(
         id="send_email",
-        description="Send an email payload.",
     )
     def send_email(to: str):
+        """Send an email payload."""
         return {"ok": True, "to": to}
 
     tools = app.manifest["agent"]["tools"]
@@ -818,7 +818,7 @@ def test_cli_up_alias_dispatches_to_deploy(monkeypatch, capsys):
         classmethod(lambda cls, *, manifest, cwd=None: stub),
     )
 
-    core.run_cli(
+    core._run_app_cli(
         _manifest_with_runtime(runtime_profile={}),
         argv=["up", "--warm", "true"],
     )
@@ -850,7 +850,7 @@ def test_cli_setup_auth_dispatches_to_client(monkeypatch, capsys):
         "from_env",
         classmethod(lambda cls, *, manifest, cwd=None: stub),
     )
-    core.run_cli(
+    core._run_app_cli(
         _manifest_with_runtime(runtime_profile={}),
         argv=["setup-auth", "--x-key-name", "demo-x", "--x-key-rpm", "55", "--ensure-runtime-key", "true"],
     )
@@ -861,7 +861,7 @@ def test_cli_setup_auth_dispatches_to_client(monkeypatch, capsys):
 
 def test_cli_rejects_unknown_subcommand(capsys):
     with pytest.raises(SystemExit) as exc:
-        core.run_cli(_manifest_with_runtime(runtime_profile={}), argv=["not-a-command"])
+        core._run_app_cli(_manifest_with_runtime(runtime_profile={}), argv=["not-a-command"])
     assert exc.value.code == 2
     err = capsys.readouterr().err
     assert "invalid choice" in err
@@ -893,7 +893,7 @@ def test_cli_logs_streams_runtime_lines(monkeypatch, capsys):
         classmethod(lambda cls, *, manifest, cwd=None: stub),
     )
 
-    core.run_cli(
+    core._run_app_cli(
         _manifest_with_runtime(runtime_profile={}),
         argv=["logs"],
     )
