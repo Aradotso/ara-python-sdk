@@ -91,16 +91,16 @@ ara logs app.py | tee app.logs
 - `ARA_API_BASE_URL`: optional API override (defaults to production API)
 - `ARA_RUNTIME_KEY`: optional runtime key override for `run/events`
 - `ARA_APP_HEADER_KEY`: optional app header key override (`X-Ara-App-Key`) for `run/events/run-async/run-status`
-  - Prefer running `ara setup-auth app.py` to mint/store an app header key in `.app-header-key.local`.
-  - Set `ARA_APP_HEADER_KEY` only when overriding that generated key.
+  - Prefer running `ara setup-auth app.py` to mint keys and then export them.
+  - Set `ARA_APP_HEADER_KEY` only when explicitly using `X-Ara-App-Key` mode.
 
 Local bootstrap helper:
 
 - `ara setup-auth app.py`:
   - resolves `app_id` by app slug
-  - ensures `.runtime-key.local` exists (optional)
+  - ensures a runtime key exists (optional)
   - creates `/apps/{app_id}/x-keys` key when missing
-  - writes `.app-header-key.local` for subsequent CLI calls
+  - returns both `runtime_key` and `app_header_key` in command output
 
 ## Runtime env and secrets
 

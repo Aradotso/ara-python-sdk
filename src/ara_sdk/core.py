@@ -1504,13 +1504,7 @@ class AraClient:
         env_key = os.getenv("ARA_RUNTIME_KEY", "").strip()
         if env_key:
             return env_key
-        path = self.cwd / ".runtime-key.local"
-        if path.exists():
-            return path.read_text(encoding="utf-8").strip()
         return ""
-
-    def _app_header_key_path(self) -> pathlib.Path:
-        return self.cwd / ".app-header-key.local"
 
     def _resolve_app_header_key(self, explicit: Optional[str] = None) -> str:
         if explicit:
@@ -1518,14 +1512,6 @@ class AraClient:
         env_key = os.getenv("ARA_APP_HEADER_KEY", "").strip()
         if env_key:
             return env_key
-        path = self._app_header_key_path()
-        if path.exists():
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                return ""
-            if isinstance(payload, dict):
-                return str(payload.get("key") or "").strip()
         return ""
 
     def _extract_secret_sync_plan(self, runtime_profile: dict[str, Any]) -> list[SecretDefinition]:
@@ -1644,12 +1630,6 @@ class AraClient:
         runtime_key = str(key_out.get("key") or "").strip()
         if not runtime_key:
             raise RuntimeError("deploy failed: runtime key missing")
-        key_path = self.cwd / ".runtime-key.local"
-        key_path.write_text(runtime_key + "\n", encoding="utf-8")
-        try:
-            key_path.chmod(0o600)
-        except OSError:
-            pass
 
         warmup = None
         if warm:
@@ -1664,8 +1644,8 @@ class AraClient:
         return {
             "app_id": app_id,
             "slug": self.manifest.get("slug"),
-            "runtime_key_written": True,
-            "runtime_key_path": str(key_path),
+            "runtime_key_created": True,
+            "runtime_key": runtime_key,
             "warmup": warmup,
             "secrets": secret_sync,
         }
@@ -1757,12 +1737,6 @@ class AraClient:
             runtime_key = str(key_out.get("key") or "").strip()
             if runtime_key:
                 runtime_key_created = True
-                key_path = self.cwd / ".runtime-key.local"
-                key_path.write_text(runtime_key + "\n", encoding="utf-8")
-                try:
-                    key_path.chmod(0o600)
-                except OSError:
-                    pass
 
         app_header_key = self._resolve_app_header_key()
         x_key_created = False
@@ -1778,27 +1752,6 @@ class AraClient:
             x_key_created = bool(app_header_key)
             x_key_id = str(created.get("id") or "")
             x_key_prefix = str(created.get("key_prefix") or "")
-            if app_header_key:
-                path = self._app_header_key_path()
-                path.write_text(
-                    json.dumps(
-                        {
-                            "app_id": app_id,
-                            "slug": self.manifest.get("slug"),
-                            "key": app_header_key,
-                            "key_prefix": x_key_prefix,
-                            "key_id": x_key_id,
-                            "created_at": datetime.now(timezone.utc).isoformat(),
-                        },
-                        indent=2,
-                    )
-                    + "\n",
-                    encoding="utf-8",
-                )
-                try:
-                    path.chmod(0o600)
-                except OSError:
-                    pass
         else:
             existing = self.http.list_x_keys(app_id).get("keys") or []
             if isinstance(existing, list):
@@ -1816,6 +1769,7 @@ class AraClient:
             "slug": self.manifest.get("slug"),
             "runtime_key_present": bool(runtime_key),
             "runtime_key_created": runtime_key_created,
+            "runtime_key": runtime_key,
             "app_header_key_present": bool(app_header_key),
             "app_header_key_created": x_key_created,
             "app_header_key_id": x_key_id,
@@ -1951,6 +1905,7 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
     p_run.add_argument("--agent", default="")
     p_run.add_argument("--message", default="")
     p_run.add_argument("--input", action="append", default=[])
+    p_run.add_argument("--runtime-key", default="")
     p_run.add_argument("--app-header-key", default="")
 
     p_events = sub.add_parser("events")
@@ -1962,6 +1917,7 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
     p_events.add_argument("--input", action="append", default=[])
     p_events.add_argument("--metadata", action="append", default=[])
     p_events.add_argument("--idempotency-key", default="")
+    p_events.add_argument("--runtime-key", default="")
     p_events.add_argument("--app-header-key", default="")
 
     p_run_async = sub.add_parser("run-async")
@@ -1974,13 +1930,17 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
     p_run_async.add_argument("--callback-event", action="append", default=[])
     p_run_async.add_argument("--run-id", default="")
     p_run_async.add_argument("--idempotency-key", default="")
+    p_run_async.add_argument("--runtime-key", default="")
     p_run_async.add_argument("--app-header-key", default="")
 
     p_run_status = sub.add_parser("run-status")
     p_run_status.add_argument("--run-id", default="")
+    p_run_status.add_argument("--runtime-key", default="")
     p_run_status.add_argument("--app-header-key", default="")
 
-    sub.add_parser("logs")
+    p_logs = sub.add_parser("logs")
+    p_logs.add_argument("--runtime-key", default="")
+    p_logs.add_argument("--app-header-key", default="")
 
     p_invite = sub.add_parser("invite")
     p_invite.add_argument("--email", default="")
@@ -2019,13 +1979,14 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
             "warm_agent_id": args.warm_agent or None,
             "on_existing": args.on_existing,
         }
-        client.deploy(**deploy_kwargs)
+        deploy_out = client.deploy(**deploy_kwargs)
         print(
             json.dumps(
                 {
                     "ok": True,
                     "slug": str(manifest.get("slug") or ""),
-                    "runtime_key_written": True,
+                    "runtime_key_created": bool(deploy_out.get("runtime_key_created")),
+                    "runtime_key": str(deploy_out.get("runtime_key") or ""),
                     "next": {
                         "setup_auth_command": "python app.py setup-auth",
                     },
@@ -2047,6 +2008,7 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
                 client.run(
                     agent_id=args.agent or None,
                     input_payload=payload,
+                    runtime_key=args.runtime_key or None,
                     app_header_key=args.app_header_key or None,
                 ),
                 indent=2,
@@ -2069,6 +2031,7 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
                     payload=payload,
                     metadata=metadata,
                     idempotency_key=idem,
+                    runtime_key=args.runtime_key or None,
                     app_header_key=args.app_header_key or None,
                 ),
                 indent=2,
@@ -2100,6 +2063,7 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
                     callback=callback,
                     run_id=run_id,
                     idempotency_key=idem,
+                    runtime_key=args.runtime_key or None,
                     app_header_key=args.app_header_key or None,
                 ),
                 indent=2,
@@ -2111,12 +2075,21 @@ def run_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, defa
         rid = str(args.run_id or "").strip()
         if not rid:
             raise RuntimeError("run-status requires --run-id")
-        print(json.dumps(client.run_status(run_id=rid, app_header_key=args.app_header_key or None), indent=2))
+        print(
+            json.dumps(
+                client.run_status(
+                    run_id=rid,
+                    runtime_key=args.runtime_key or None,
+                    app_header_key=args.app_header_key or None,
+                ),
+                indent=2,
+            )
+        )
         return
 
     if command == "logs":
         try:
-            for row in client.logs():
+            for row in client.logs(runtime_key=args.runtime_key or None, app_header_key=args.app_header_key or None):
                 print(_format_runtime_log_line(row), flush=True)
         except KeyboardInterrupt:
             return

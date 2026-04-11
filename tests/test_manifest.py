@@ -267,6 +267,26 @@ def test_from_env_accepts_legacy_access_token_fallback(monkeypatch, tmp_path):
     assert client.http.api_key == "legacy-token"
 
 
+def test_runtime_auth_resolution_ignores_local_key_files(monkeypatch, tmp_path):
+    (tmp_path / ".runtime-key.local").write_text("ak_app_file_key\n", encoding="utf-8")
+    (tmp_path / ".app-header-key.local").write_text(
+        '{"key":"aik_app_file_key"}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("ARA_RUNTIME_KEY", raising=False)
+    monkeypatch.delenv("ARA_APP_HEADER_KEY", raising=False)
+
+    client = core.AraClient(
+        manifest=_manifest_with_runtime(runtime_profile={}),
+        api_base_url="https://api.ara.so",
+        api_key="token",
+        cwd=tmp_path,
+    )
+
+    assert client._resolve_runtime_key() == ""
+    assert client._resolve_app_header_key() == ""
+
+
 def test_runtime_duplicate_secret_name_keeps_first_definition():
     profile = runtime(
         secrets=[
@@ -499,7 +519,8 @@ def test_deploy_syncs_local_secrets_before_warmup(tmp_path):
         "synced": ["provider-local"],
         "referenced_only": ["provider-shared"],
     }
-    assert (tmp_path / ".runtime-key.local").exists()
+    assert out["runtime_key_created"] is True
+    assert out["runtime_key"] == "ak_app_test"
 
 
 def test_deploy_surfaces_backend_secrets_route_compat_error(tmp_path):
@@ -633,7 +654,7 @@ def test_deploy_without_runtime_secrets_does_not_reconcile_app_secrets(tmp_path)
     assert all(not call.startswith("delete_secret:") for call in fake_http.calls)
 
 
-def test_setup_auth_creates_and_persists_app_header_key(tmp_path):
+def test_setup_auth_creates_app_header_key_without_local_files(tmp_path):
     client = core.AraClient(
         manifest=_manifest_with_runtime(runtime_profile={}),
         api_base_url="https://api.ara.so",
@@ -652,9 +673,9 @@ def test_setup_auth_creates_and_persists_app_header_key(tmp_path):
     out = client.setup_auth()
 
     assert out["app_id"] == "app_existing_1"
+    assert out["runtime_key"] == "ak_app_test"
     assert out["app_header_key_present"] is True
     assert out["app_header_key_created"] is True
-    assert (tmp_path / ".app-header-key.local").exists()
     assert "create_x_key" in fake_http.calls
 
 
@@ -745,8 +766,8 @@ def test_cli_up_alias_dispatches_to_deploy(monkeypatch, capsys):
             return {
                 "app_id": "app_test_1",
                 "slug": "test-app",
-                "runtime_key_written": True,
-                "runtime_key_path": "/tmp/.runtime-key.local",
+                "runtime_key_created": True,
+                "runtime_key": "ak-secret",
                 "warmup": {"runtime_key": "ak-secret"},
                 "secrets": {
                     "synced": ["provider-local"],
@@ -774,7 +795,7 @@ def test_cli_up_alias_dispatches_to_deploy(monkeypatch, capsys):
     cli_out = capsys.readouterr().out
     assert '"ok": true' in cli_out.lower()
     assert '"slug": "test-app"' in cli_out.lower()
-    assert '"runtime_key_written": true' in cli_out.lower()
+    assert '"runtime_key_created": true' in cli_out.lower()
     assert "OPENAI_API_KEY" not in cli_out
     assert "sk-local" not in cli_out
 
@@ -857,7 +878,8 @@ def test_cli_local_loads_dotenv_without_api_key(monkeypatch, tmp_path, capsys):
 
 def test_cli_logs_streams_runtime_lines(monkeypatch, capsys):
     class _StubClient:
-        def logs(self):
+        def logs(self, runtime_key=None, app_header_key=None):
+            _ = (runtime_key, app_header_key)
             yield {
                 "timestamp": "2026-04-10T01:02:03Z",
                 "level": "info",

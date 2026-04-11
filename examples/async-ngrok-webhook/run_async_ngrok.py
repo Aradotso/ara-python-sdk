@@ -62,6 +62,7 @@ def main() -> None:
     parser.add_argument("--poll-timeout", type=int, default=180)
     parser.add_argument("--poll-interval", type=float, default=2.0)
     parser.add_argument("--setup-auth", action="store_true")
+    parser.add_argument("--runtime-key", default="")
     parser.add_argument("--app-header-key", default="")
     args = parser.parse_args()
 
@@ -88,6 +89,7 @@ def main() -> None:
         input_payload=input_payload,
         response_mode="webhook",
         callback=callback,
+        runtime_key=(args.runtime_key or None),
         app_header_key=(args.app_header_key or None),
     )
     print(json.dumps({"submit": submit, "callback_url": callback_url}, indent=2))
@@ -95,7 +97,11 @@ def main() -> None:
     run_id = _extract_run_id(submit)
     deadline = time.time() + max(1, args.poll_timeout)
     while True:
-        status = client.run_status(run_id=run_id, app_header_key=(args.app_header_key or None))
+        status = client.run_status(
+            run_id=run_id,
+            runtime_key=(args.runtime_key or None),
+            app_header_key=(args.app_header_key or None),
+        )
         run = status.get("run") if isinstance(status, dict) else {}
         state = str((run or {}).get("status") or "").strip()
         print(json.dumps({"run_id": run_id, "status": state, "run": run}, indent=2))

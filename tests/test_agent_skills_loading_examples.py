@@ -160,11 +160,10 @@ def test_live_reliability_probe_three_of_three() -> None:
 
     for case in cases:
         cwd = EXAMPLES_ROOT / case["folder"]
-        _ = _run_app_json(cwd, "deploy", timeout=240, retries=2)
-
-        # Use runtime key auth path from deploy for deterministic run checks.
-        header_key_path = cwd / ".app-header-key.local"
-        header_key_path.unlink(missing_ok=True)
+        deploy_payload = _run_app_json(cwd, "deploy", timeout=240, retries=2)
+        runtime_key = str(deploy_payload.get("runtime_key") or "").strip()
+        if not runtime_key:
+            raise AssertionError(f"deploy did not return runtime_key for {case['folder']}")
 
         probe_outputs: list[str] = []
         for _attempt in range(3):
@@ -175,7 +174,10 @@ def test_live_reliability_probe_three_of_three() -> None:
                 case["agent"],
                 "--message",
                 "RELIABILITY_PROBE|hello from ara sdk",
-                env={"ARA_SDK_DEBUG_HTTP_ERRORS": "true"},
+                env={
+                    "ARA_SDK_DEBUG_HTTP_ERRORS": "true",
+                    "ARA_RUNTIME_KEY": runtime_key,
+                },
                 timeout=240,
                 retries=2,
             )
@@ -189,7 +191,10 @@ def test_live_reliability_probe_three_of_three() -> None:
             case["agent"],
             "--message",
             "hello from ara sdk",
-            env={"ARA_SDK_DEBUG_HTTP_ERRORS": "true"},
+            env={
+                "ARA_SDK_DEBUG_HTTP_ERRORS": "true",
+                "ARA_RUNTIME_KEY": runtime_key,
+            },
             timeout=240,
             retries=2,
         )

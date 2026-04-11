@@ -12,7 +12,4 @@ build/
 .venv/
 .env
 .runtime-key.local
-examples/agent-skills-loading/01-inline-instructions/.app-header-key.local
-examples/agent-skills-loading/02-script-referenced/.app-header-key.local
-examples/agent-skills-loading/03-decorator-handler/.app-header-key.local
-examples/canonical-email-chat-cron/.app-header-key.local
+.app-header-key.local

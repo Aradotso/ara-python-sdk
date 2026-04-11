@@ -25,10 +25,10 @@ ara deploy app.py
 ara setup-auth app.py
 ```
 
-This writes local key files used by runtime calls:
+Use the returned key values directly:
 
-- `.runtime-key.local` (optional fallback)
-- `.app-header-key.local` (`X-Ara-App-Key`)
+- export `ARA_RUNTIME_KEY` with the `ak_app_...` value from `deploy/setup-auth` output, or
+- pass `--app-header-key aik_app_...` explicitly to runtime commands
 
 ## 2) Start local receiver
 
@@ -54,6 +54,7 @@ cd ara-python-sdk/examples/async-ngrok-webhook
 python3 run_async_ngrok.py \
   --workflow demo-agent \
   --message "Test async callback over ngrok" \
+  --runtime-key "$ARA_RUNTIME_KEY" \
   --callback-secret demo-secret
 ```
 
