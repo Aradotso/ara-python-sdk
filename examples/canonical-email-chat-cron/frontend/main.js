@@ -1,5 +1,5 @@
 const defaults = {
-  apiBase: import.meta.env.VITE_ARA_API_BASE_URL || "https://ara-api-prd.up.railway.app",
+  apiBase: import.meta.env.VITE_ARA_API_BASE_URL || "https://api.ara.so",
   appId: import.meta.env.VITE_ARA_APP_ID || "",
   runtimeKey: import.meta.env.VITE_ARA_RUNTIME_KEY || "",
   agentId: import.meta.env.VITE_ARA_CHAT_AGENT_ID || "demo-chat",

@@ -55,7 +55,7 @@ This keeps runtime key/bootstrap logic inside SDK CLI primitives.
 Create `frontend/.env.local`:
 
 ```dotenv
-VITE_ARA_API_BASE_URL=https://ara-api-prd.up.railway.app
+VITE_ARA_API_BASE_URL=https://api.ara.so
 VITE_ARA_APP_ID=app_...
 VITE_ARA_RUNTIME_KEY=ak_app_...
 VITE_ARA_CHAT_AGENT_ID=demo-chat
