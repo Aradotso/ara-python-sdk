@@ -8,6 +8,34 @@ from types import ModuleType
 from .core import App, run_auth_cli, run_cli, run_runtime_cli
 
 
+def _print_help(bin_name: str) -> None:
+    print(
+        "\n".join(
+            [
+                f"Usage: {bin_name} <command> <app_script.py> [args...]",
+                "",
+                "App commands (require <app_script.py>):",
+                "  deploy, up, run, run-async, run-status, logs, events, setup, setup-auth, invite",
+                "",
+                "Global command groups (no app script required):",
+                "  auth      login/whoami/logout for CLI auth",
+                "  runtime   runtime capabilities, tools, skills, and control APIs",
+                "",
+                "Examples:",
+                f"  {bin_name} deploy app.py",
+                f"  {bin_name} run app.py --agent booking-coordinator --message \"hello\"",
+                f"  {bin_name} auth login",
+                f"  {bin_name} runtime capabilities --session sess-123",
+                "",
+                "More help:",
+                f"  {bin_name} <command> <app_script.py> --help",
+                f"  {bin_name} auth --help",
+                f"  {bin_name} runtime --help",
+            ]
+        )
+    )
+
+
 def _load_module(path: pathlib.Path) -> ModuleType:
     spec = importlib.util.spec_from_file_location("ara_user_app", str(path))
     if spec is None or spec.loader is None:
@@ -26,10 +54,19 @@ def _discover_app(module: ModuleType) -> App:
 
 def main() -> None:
     bin_name = pathlib.Path(sys.argv[0]).name or "ara"
+    if len(sys.argv) >= 2 and sys.argv[1] in {"-h", "--help", "help"}:
+        _print_help(bin_name)
+        return
     if len(sys.argv) >= 2 and sys.argv[1] == "runtime":
+        if len(sys.argv) == 2:
+            run_runtime_cli(argv=["--help"])
+            return
         run_runtime_cli(argv=sys.argv[2:])
         return
     if len(sys.argv) >= 2 and sys.argv[1] == "auth":
+        if len(sys.argv) == 2:
+            run_auth_cli(argv=["--help"])
+            return
         run_auth_cli(argv=sys.argv[2:])
         return
     if len(sys.argv) < 3:

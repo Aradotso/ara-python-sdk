@@ -45,6 +45,17 @@ def test_standalone_cli_usage_mentions_invoked_binary(monkeypatch):
         sdk_main.main()
 
 
+def test_standalone_cli_help_lists_top_level_commands(monkeypatch, capsys):
+    monkeypatch.setattr(sdk_main.sys, "argv", ["ara", "--help"])
+
+    sdk_main.main()
+
+    out = capsys.readouterr().out
+    assert "App commands (require <app_script.py>):" in out
+    assert "auth      login/whoami/logout for CLI auth" in out
+    assert "runtime   runtime capabilities, tools, skills, and control APIs" in out
+
+
 def test_runtime_cli_dispatches_without_app_script(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -61,4 +72,40 @@ def test_runtime_cli_dispatches_without_app_script(monkeypatch):
     sdk_main.main()
 
     assert captured["argv"] == ["capabilities", "--session", "sess-123"]
+
+
+def test_runtime_group_prints_group_help_without_subcommand(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _run_runtime_cli(argv=None):
+        captured["argv"] = list(argv or [])
+
+    monkeypatch.setattr(sdk_main, "run_runtime_cli", _run_runtime_cli)
+    monkeypatch.setattr(
+        sdk_main.sys,
+        "argv",
+        ["ara", "runtime"],
+    )
+
+    sdk_main.main()
+
+    assert captured["argv"] == ["--help"]
+
+
+def test_auth_group_prints_group_help_without_subcommand(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _run_auth_cli(argv=None):
+        captured["argv"] = list(argv or [])
+
+    monkeypatch.setattr(sdk_main, "run_auth_cli", _run_auth_cli)
+    monkeypatch.setattr(
+        sdk_main.sys,
+        "argv",
+        ["ara", "auth"],
+    )
+
+    sdk_main.main()
+
+    assert captured["argv"] == ["--help"]
 
