@@ -8,6 +8,15 @@ Public Python SDK for building Ara apps with a decorator-first workflow style.
 pip install ara-sdk
 ```
 
+## Local testing (no uv)
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e . pytest
+python -m pytest -q
+```
+
 ## Principles
 
 - Public SDK is generic and provider-agnostic.
@@ -108,6 +117,41 @@ Local bootstrap helper:
 
 - `env`: plain runtime environment values (`runtime_profile.env`)
 - `secrets`: ordered secret references (`runtime_profile.secret_refs`)
+
+### Container bootstrap (remote, Modal-style)
+
+For container-side setup, declare startup bootstrap commands in `runtime(...)` and run them inside the
+provisioned app sandbox. This keeps build/bootstrap logic in the cloud container instead of depending on
+local `uv` workflows.
+
+```python
+from ara_sdk import App, entrypoint, local_file, runtime
+
+app = App(
+    "Research Assistant",
+    project_name="research-assistant",
+    runtime_profile=runtime(
+        image="python:3.12-slim",
+        files=[
+            local_file("./scripts/bootstrap.sh", path="scripts/bootstrap.sh", executable=True),
+        ],
+        startup=entrypoint("scripts/bootstrap.sh"),
+    ),
+)
+```
+
+`python_packages` / `node_packages` remain part of runtime profile metadata, but if you need deterministic
+install behavior today, use startup bootstrap commands in the container.
+
+For observability, run warmup and stream runtime logs:
+
+```bash
+ara deploy app.py --warm true
+ara logs app.py
+```
+
+Warmup/run lifecycle logs are emitted as `run.warmup.*` and `run.*`; startup failures are surfaced into
+those logs with command error previews.
 
 Secret helper options:
 
