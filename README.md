@@ -97,7 +97,7 @@ Examples: [github.com/Aradotso/ara-python-sdk/tree/main/examples](https://github
 
 ## FAQ
 
-### What is the boundary between Ara and `ara-sdk`?
+### What is the difference between Ara and `ara-sdk`?
 Ara is the managed control/runtime plane (execution, lifecycle, policy, observability), while `ara-sdk` is the authoring layer for app behavior (agents, tools, schedules, endpoints). You define Python app logic; Ara handles runtime operations you would otherwise run as custom infrastructure.
 
 ### Does “24/7 runtime” mean I pay for permanently hot compute?
