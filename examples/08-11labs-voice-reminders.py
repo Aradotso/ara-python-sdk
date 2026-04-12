@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import urllib.error
-import urllib.request
 
 from dotenv import load_dotenv
 from ara_sdk import App, Secret, invoke, runtime, schedule
@@ -12,103 +10,11 @@ from ara_sdk import App, Secret, invoke, runtime, schedule
 load_dotenv(".env")
 
 
-def _labs11_request(method: str, path: str, payload: dict | None = None) -> dict:
-    headers: dict[str, str] = {
-        "xi-api-key": os.getenv("LABS11_API_KEY", ""),
-        "User-Agent": "ara-11labs-demo/1.0",
-    }
-    body: bytes | None = None
-    if payload is not None:
-        headers["Content-Type"] = "application/json"
-        body = json.dumps(payload).encode("utf-8")
-
-    request = urllib.request.Request(
-        f"https://api.elevenlabs.io{path}",
-        data=body,
-        method=method.upper(),
-        headers=headers,
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=45) as response:
-            raw_text = response.read().decode("utf-8", errors="replace")
-            if not raw_text.strip():
-                return {"ok": True, "status": response.status, "json": {}}
-            content_type = str(response.headers.get("Content-Type", "")).lower()
-            if "application/json" in content_type:
-                return {"ok": True, "status": response.status, "json": json.loads(raw_text)}
-            return {"ok": True, "status": response.status, "text": raw_text}
-    except urllib.error.HTTPError as exc:
-        raw_text = exc.read().decode("utf-8", errors="replace")
-        if raw_text.strip():
-            try:
-                return {"ok": False, "status": exc.code, "error": json.loads(raw_text)}
-            except json.JSONDecodeError:
-                return {"ok": False, "status": exc.code, "error": raw_text}
-        return {"ok": False, "status": exc.code, "error": "11labs request failed"}
-
-
 def _extract_e164_from_text(raw_text: str) -> str:
     match = re.search(r"\+\d{8,15}", str(raw_text or ""))
     return str(match.group(0) if match else "").strip()
 
-
-def _resolve_call_binding(agent_id: str, phone_number_id: str) -> dict:
-    response = _labs11_request("GET", "/v1/convai/phone-numbers")
-    if not response.get("ok"):
-        return {"ok": False, "error": "failed to list 11labs phone numbers", "details": response}
-
-    rows = response.get("json")
-    if not isinstance(rows, list) or not rows:
-        return {"ok": False, "error": "no 11labs phone numbers found"}
-
-    selected = None
-    if phone_number_id:
-        for row in rows:
-            if str((row or {}).get("phone_number_id") or "").strip() == phone_number_id:
-                selected = row
-                break
-
-    if selected is None and agent_id:
-        for row in rows:
-            assigned = (row or {}).get("assigned_agent") or {}
-            if str(assigned.get("agent_id") or "").strip() == agent_id:
-                selected = row
-                break
-
-    if selected is None:
-        for row in rows:
-            assigned = (row or {}).get("assigned_agent") or {}
-            if str(assigned.get("agent_id") or "").strip():
-                selected = row
-                break
-
-    if selected is None:
-        selected = rows[0]
-
-    selected = selected if isinstance(selected, dict) else {}
-    assigned = selected.get("assigned_agent") if isinstance(selected.get("assigned_agent"), dict) else {}
-
-    resolved_phone_id = phone_number_id or str(selected.get("phone_number_id") or "").strip()
-    resolved_agent_id = agent_id or str(assigned.get("agent_id") or "").strip()
-
-    if not resolved_phone_id:
-        return {"ok": False, "error": "resolved phone number is missing phone_number_id", "selected": selected}
-    if not resolved_agent_id:
-        return {
-            "ok": False,
-            "error": "resolved phone number has no assigned agent_id; set LABS11_AGENT_ID explicitly",
-            "selected": selected,
-        }
-
-    return {
-        "ok": True,
-        "agent_id": resolved_agent_id,
-        "agent_phone_number_id": resolved_phone_id,
-        "selected_phone_number": {
-            "phone_number_id": selected.get("phone_number_id"),
-            "phone_number": selected.get("phone_number"),
-        },
-    }
+REMINDER_CRON_EXPR = os.getenv("ARA_11LABS_REMINDER_CRON", "*/2 * * * *")
 
 
 app = App(
@@ -136,16 +42,104 @@ def labs11_start_outbound_call(
     agent_phone_number_id: str = "",
 ) -> dict:
     """Start an outbound reminder call through 11labs voice agents."""
+    import json as _json
+    import os as _os
+    import urllib.error as _urllib_error
+    import urllib.request as _urllib_request
+
+    def _request(method: str, path: str, payload: dict | None = None) -> dict:
+        headers: dict[str, str] = {
+            "xi-api-key": _os.getenv("LABS11_API_KEY", ""),
+            "User-Agent": "ara-11labs-demo/1.0",
+        }
+        body: bytes | None = None
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
+            body = _json.dumps(payload).encode("utf-8")
+
+        req = _urllib_request.Request(
+            f"https://api.elevenlabs.io{path}",
+            data=body,
+            method=method.upper(),
+            headers=headers,
+        )
+        try:
+            with _urllib_request.urlopen(req, timeout=45) as response:
+                raw_text = response.read().decode("utf-8", errors="replace")
+                if not raw_text.strip():
+                    return {"ok": True, "status": response.status, "json": {}}
+                content_type = str(response.headers.get("Content-Type", "")).lower()
+                if "application/json" in content_type:
+                    return {"ok": True, "status": response.status, "json": _json.loads(raw_text)}
+                return {"ok": True, "status": response.status, "text": raw_text}
+        except _urllib_error.HTTPError as exc:
+            raw_text = exc.read().decode("utf-8", errors="replace")
+            if raw_text.strip():
+                try:
+                    return {"ok": False, "status": exc.code, "error": _json.loads(raw_text)}
+                except _json.JSONDecodeError:
+                    return {"ok": False, "status": exc.code, "error": raw_text}
+            return {"ok": False, "status": exc.code, "error": "11labs request failed"}
+
+    def _resolve_binding(current_agent_id: str, current_phone_id: str) -> dict:
+        response = _request("GET", "/v1/convai/phone-numbers")
+        if not response.get("ok"):
+            return {"ok": False, "error": "failed to list 11labs phone numbers", "details": response}
+
+        rows = response.get("json")
+        if not isinstance(rows, list) or not rows:
+            return {"ok": False, "error": "no 11labs phone numbers found"}
+
+        selected = None
+        if current_phone_id:
+            for row in rows:
+                if str((row or {}).get("phone_number_id") or "").strip() == current_phone_id:
+                    selected = row
+                    break
+
+        if selected is None and current_agent_id:
+            for row in rows:
+                assigned = (row or {}).get("assigned_agent") or {}
+                if str(assigned.get("agent_id") or "").strip() == current_agent_id:
+                    selected = row
+                    break
+
+        if selected is None:
+            for row in rows:
+                assigned = (row or {}).get("assigned_agent") or {}
+                if str(assigned.get("agent_id") or "").strip():
+                    selected = row
+                    break
+
+        if selected is None:
+            selected = rows[0]
+
+        selected = selected if isinstance(selected, dict) else {}
+        assigned = selected.get("assigned_agent") if isinstance(selected.get("assigned_agent"), dict) else {}
+
+        resolved_phone_id = current_phone_id or str(selected.get("phone_number_id") or "").strip()
+        resolved_agent_id = current_agent_id or str(assigned.get("agent_id") or "").strip()
+
+        if not resolved_phone_id:
+            return {"ok": False, "error": "resolved phone number is missing phone_number_id", "selected": selected}
+        if not resolved_agent_id:
+            return {
+                "ok": False,
+                "error": "resolved phone number has no assigned agent_id; set LABS11_AGENT_ID explicitly",
+                "selected": selected,
+            }
+        return {"ok": True, "agent_id": resolved_agent_id, "agent_phone_number_id": resolved_phone_id}
+
     target_number = str(to_number or "").strip()
-    chosen_agent_id = str(agent_id or os.getenv("LABS11_AGENT_ID", "")).strip()
+    chosen_agent_id = str(agent_id or _os.getenv("LABS11_AGENT_ID", "")).strip()
     chosen_phone_number_id = str(
-        agent_phone_number_id or os.getenv("LABS11_AGENT_PHONE_NUMBER_ID", "")
+        agent_phone_number_id or _os.getenv("LABS11_AGENT_PHONE_NUMBER_ID", "")
     ).strip()
 
     if not target_number:
         return {"ok": False, "error": "missing to_number"}
     if not chosen_agent_id or not chosen_phone_number_id:
-        resolved = _resolve_call_binding(chosen_agent_id, chosen_phone_number_id)
+        resolved = _resolve_binding(chosen_agent_id, chosen_phone_number_id)
         if not resolved.get("ok"):
             return resolved
         chosen_agent_id = str(resolved.get("agent_id") or "").strip()
@@ -156,7 +150,7 @@ def labs11_start_outbound_call(
         "agent_phone_number_id": chosen_phone_number_id,
         "to_number": target_number,
     }
-    response = _labs11_request("POST", "/v1/convai/twilio/outbound-call", payload=payload)
+    response = _request("POST", "/v1/convai/twilio/outbound-call", payload=payload)
     if not response.get("ok"):
         return response
     return {
@@ -170,7 +164,7 @@ def labs11_start_outbound_call(
 
 WEEKDAY_11LABS_REMINDER = schedule.cron(
     id="weekday-11labs-voice-reminder",
-    expr="*/15 * * * *",
+    expr=REMINDER_CRON_EXPR,
     timezone="UTC",
     run=invoke.tool(
         "labs11_start_outbound_call",
