@@ -21,12 +21,11 @@ ara run <example.py> --agent <agent_id> --runtime-key "<runtime_key>" --message 
 5. `02-canonical-email-chat-cron.py` - canonical email + chat + cron workflow.
 6. `03-async-ngrok-webhook.py` - async run + webhook callback (with ngrok helpers).
 7. `04-calcom-booking.py` - booking assistant example.
-8. `05-a-framework-adapters-langgraph.py` - LangGraph adapter wiring.
-9. `05-b-framework-adapters-agno.py` - Agno adapter wiring.
-10. `06-programmatic-secrets-redeploy.py` - programmatic secrets + redeploy flow.
-11. `07-app-schedule-decorator.py` - static scheduling via `@app.schedule(...)`.
-12. `07b-app-schedule-decorator.py` - runtime-created schedule (fire-and-forget).
-13. `07c-runtime-automation-manager.py` - create/list/delete automation lifecycle.
-14. `09-runtime-model-selector.py` - minimal `runtime(model=...)` selector example.
+8. `06-programmatic-secrets-redeploy.py` - programmatic secrets + redeploy flow.
+9. `07-app-schedule-decorator.py` - static scheduling via `@app.schedule(...)`.
+10. `07b-app-schedule-decorator.py` - runtime-created schedule (fire-and-forget).
+11. `07c-runtime-automation-manager.py` - create/list/delete automation lifecycle.
+12. `08-11labs-voice-reminders.py` - 11labs outbound call + recurring cron reminder flow.
+13. `09-runtime-model-selector.py` - minimal `runtime(model=...)` selector example.
 
 For full docs and walkthroughs: <https://docs.ara.so/examples/overview>
