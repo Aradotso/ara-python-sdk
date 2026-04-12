@@ -26,13 +26,8 @@ app = App(
     sandbox=sandbox(max_concurrency=3),
 )
 def booking_coordinator(payload: dict) -> str:
-    """Build runtime scheduling instructions from JSON input."""
     input_payload = payload if isinstance(payload, dict) else {}
     action = str(input_payload.get("action") or "").strip().lower()
     if action == "send-reminders":
-        return """
-Send reminders for pending booking confirmations.
-""".strip()
-    return """
-Coordinate scheduling and booking actions.
-""".strip()
+        return "Send reminders for pending booking confirmations."
+    return "Coordinate scheduling and booking actions."

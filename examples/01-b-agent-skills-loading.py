@@ -35,7 +35,6 @@ app = App(
     skills=["bash"],
 )
 def title_case_agent(payload: dict) -> str:
-    """Build runtime instructions from JSON input payload."""
     input_payload = payload if isinstance(payload, dict) else {}
     text = str(input_payload.get("text") or input_payload.get("message") or "").strip()
     mode = str(input_payload.get("mode") or "").strip().lower()

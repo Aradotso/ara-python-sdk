@@ -18,7 +18,6 @@ def build_app(*, dotenv_file: str, local_openai_key: str) -> App:
         entrypoint=True,
     )
     def probe_agent(payload: dict) -> str:
-        """Probe entrypoint for redeploy validation."""
         return "Respond with a short probe confirmation."
 
     return app

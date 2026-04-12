@@ -107,7 +107,6 @@ def send_email(to: str, subject: str, body: str) -> dict:
     ],
 )
 def demo_chat(payload: dict) -> str:
-    """Build chat instructions from JSON input payload."""
     input_payload = payload if isinstance(payload, dict) else {}
     intent = str(input_payload.get("intent") or "").strip().lower()
     if intent == "schedule-recurring-email":

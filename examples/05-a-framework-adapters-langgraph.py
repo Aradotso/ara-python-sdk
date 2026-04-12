@@ -17,13 +17,4 @@ app = App(
     },
 )
 def message_router(payload: dict) -> str:
-    """Build runtime routing instructions from JSON input payload."""
-    input_payload = payload if isinstance(payload, dict) else {}
-    route = str(input_payload.get("route") or "").strip().lower()
-    if route:
-        return f"""
-Route incoming messages to the framework worker using route='{route}'.
-""".strip()
-    return """
-Route incoming messages to the framework worker.
-""".strip()
+    return "Route incoming messages to the framework worker."

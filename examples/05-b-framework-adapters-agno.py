@@ -20,13 +20,4 @@ app = App(
     },
 )
 def followup_writer(payload: dict) -> str:
-    """Build runtime follow-up instructions from JSON input payload."""
-    input_payload = payload if isinstance(payload, dict) else {}
-    tone = str(input_payload.get("tone") or "").strip().lower()
-    if tone:
-        return f"""
-Draft concise follow-up text for pending threads using tone='{tone}'.
-""".strip()
-    return """
-Draft concise follow-up text for pending threads.
-""".strip()
+    return "Draft concise follow-up text for pending threads."
