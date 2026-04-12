@@ -10,5 +10,5 @@ app = App(
 @app.agent(
     entrypoint=True,
 )
-def hello_agent(payload: dict) -> str:
+def hello_agent(input: dict) -> str:
     return "Reply with a short friendly greeting."

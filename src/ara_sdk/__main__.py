@@ -13,6 +13,7 @@ def _print_help(bin_name: str) -> None:
         "\n".join(
             [
                 f"Usage: {bin_name} <command> <app_script.py> [args...]",
+                f"       {bin_name} <global-command> [args...]",
                 "",
                 "App commands (require <app_script.py>):",
                 "  deploy, up, run, run-async, run-status, logs, events, setup, setup-auth, invite",
@@ -20,17 +21,23 @@ def _print_help(bin_name: str) -> None:
                 "Global command groups (no app script required):",
                 "  auth      login/whoami/logout/rotate for CLI auth",
                 "  runtime   runtime capabilities, tools, skills, and control APIs",
+                "  session   start/status/stop authenticated cloud sessions",
+                "",
+                "Global aliases (no app script required):",
+                "  start, status, stop   shorthand for `ara runtime session <command>`",
                 "",
                 "Examples:",
                 f"  {bin_name} deploy app.py",
                 f"  {bin_name} run app.py --agent booking_coordinator --message \"hello\"",
                 f"  {bin_name} auth login",
+                f"  {bin_name} start",
                 f"  {bin_name} runtime capabilities --session sess-123",
                 "",
                 "More help:",
                 f"  {bin_name} <command> <app_script.py> --help",
                 f"  {bin_name} auth --help",
                 f"  {bin_name} runtime --help",
+                f"  {bin_name} session --help",
             ]
         )
     )
@@ -67,6 +74,15 @@ def main() -> None:
     bin_name = pathlib.Path(sys.argv[0]).name or "ara"
     if len(sys.argv) >= 2 and sys.argv[1] in {"-h", "--help", "help"}:
         _print_help(bin_name)
+        return
+    if len(sys.argv) >= 2 and sys.argv[1] in {"start", "status", "stop"}:
+        run_runtime_cli(argv=["session", sys.argv[1], *sys.argv[2:]])
+        return
+    if len(sys.argv) >= 2 and sys.argv[1] == "session":
+        if len(sys.argv) == 2:
+            run_runtime_cli(argv=["session", "--help"])
+            return
+        run_runtime_cli(argv=["session", *sys.argv[2:]])
         return
     if len(sys.argv) >= 2 and sys.argv[1] == "runtime":
         if len(sys.argv) == 2:

@@ -57,7 +57,7 @@ Example-specific notes:
 ## Quickstart
 
 ```python
-from ara_sdk import App, Secret, invoke, runtime, schedule
+from ara_sdk import App, Secret, fastapi_endpoint, invoke, runtime, schedule
 import os
 
 app = App(
@@ -91,6 +91,14 @@ def booking_coordinator(payload: dict) -> str:
     """Coordinate scheduling requests."""
     _ = payload if isinstance(payload, dict) else {}
     return "Coordinate scheduling requests."
+
+
+@app.agent(id="inbound_webhook_agent")
+@fastapi_endpoint(method="POST", path="/webhooks/inbound", auth="none")
+def inbound_webhook_agent(payload: dict) -> str:
+    """Handle inbound FastAPI endpoint payloads."""
+    _ = payload if isinstance(payload, dict) else {}
+    return "Handle inbound webhook payloads."
 ```
 
 `App(...)` takes the DNS-safe project name as its first argument.
@@ -121,6 +129,9 @@ ara runtime tools execute --session sess-123 --tool exec --arg command="ls -la"
 ara runtime control actions --session sess-123
 ara runtime control call --session sess-123 --action list_windows
 ara runtime control call --session sess-123 --action launch_app --arg id=browser --arg url=https://mail.google.com
+ara runtime session start
+ara runtime session status
+ara runtime session stop
 ```
 
 `ara logs app.py` streams live runtime events for the app across all active runs.
@@ -201,10 +212,10 @@ those logs with command error previews.
 Secret helper options:
 
 - `Secret.from_name(name, required_keys=None)` (reference only)
-- `Secret.from_dict(name_or_env_dict, env_dict=None, *, required_keys=None, name=None)`:
-  - `Secret.from_dict("provider-local", {...})` for explicit naming
-  - `Secret.from_dict({...})` (or `Secret.from_dict({...}, name="provider-local")`) for programmatic local secrets
-- `Secret.from_dotenv(name=None, filename=".env")` (auto-named when name omitted)
+- `Secret.from_dict(env_dict)` (auto-named from key set)
+- `Secret.from_dotenv(filename=".env")` (auto-named from key set)
+- Migration note: `Secret.from_dict(...)` and `Secret.from_dotenv(...)` no longer accept `name=` or `required_keys=`.
+  Use `Secret.from_name(...)` when you need explicit naming/required-key constraints.
 
 Deploy behavior:
 

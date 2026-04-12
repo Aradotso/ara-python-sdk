@@ -8,5 +8,5 @@ app = App(
 @app.agent(
     sandbox=sandbox(max_concurrency=2),
 )
-def demo_agent(payload: dict) -> str:
+def demo_agent(input: dict) -> str:
     return "Reply concisely and helpfully to incoming webhook messages."

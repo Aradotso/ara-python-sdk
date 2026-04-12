@@ -56,6 +56,8 @@ _CLI_OAUTH_ALLOWED_PROVIDERS = frozenset(
     }
 )
 ALLOWED_SANDBOX_POLICIES = frozenset({"shared", "dedicated", "ephemeral", "inherited"})
+ALLOWED_FASTAPI_ENDPOINT_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"})
+ALLOWED_ENDPOINT_AUTH_MODES = frozenset({"none", "header", "bearer", "hmac"})
 MAGIC_NUMBER_SPAWN_DEFAULT_MAX_RECURSIVE_DEPTH = 1
 MAGIC_NUMBER_SPAWN_HARD_MAX_RECURSIVE_DEPTH = 5
 MAGIC_NUMBER_SPAWN_DEFAULT_MAX_CHILDREN_PER_PARENT = 6
@@ -286,46 +288,21 @@ class SecretDefinition:
     @classmethod
     def from_dict(
         cls,
-        name_or_env_dict: str | dict[str, Any],
-        env_dict: Optional[dict[str, Any]] = None,
-        *,
-        required_keys: Optional[list[str]] = None,
-        name: Optional[str] = None,
+        env_dict: dict[str, Any],
     ) -> "SecretDefinition":
-        if isinstance(name_or_env_dict, dict):
-            if env_dict is not None:
-                raise ValueError("from_dict(dict, ...) does not accept a second env_dict argument")
-            values = {str(k): "" if v is None else str(v) for k, v in name_or_env_dict.items()}
-            if not values:
-                raise ValueError("from_dict requires a non-empty env_dict")
-            resolved_name = _normalize_secret_name(name) if name is not None else _generated_secret_name("dict", values)
-            return cls(
-                resolved_name,
-                values=values,
-                required_keys=required_keys,
-                source="dict",
-            )
-        if not isinstance(name_or_env_dict, str) or not isinstance(env_dict, dict) or not env_dict:
-            raise ValueError("from_dict requires either (name, env_dict) or (env_dict)")
-        if name is not None:
-            positional_name = _normalize_secret_name(name_or_env_dict)
-            keyword_name = _normalize_secret_name(name)
-            if positional_name != keyword_name:
-                raise ValueError("from_dict positional name conflicts with name= keyword")
+        if not isinstance(env_dict, dict) or not env_dict:
+            raise ValueError("from_dict requires a non-empty env_dict")
+        values = {str(k): "" if v is None else str(v) for k, v in env_dict.items()}
         return cls(
-            name_or_env_dict,
-            values={str(k): "" if v is None else str(v) for k, v in env_dict.items()},
-            required_keys=required_keys,
+            _generated_secret_name("dict", values),
+            values=values,
             source="dict",
         )
 
     @classmethod
     def from_dotenv(
         cls,
-        name: Optional[str] = None,
         filename: str = ".env",
-        *,
-        required_keys: Optional[list[str]] = None,
     ) -> "SecretDefinition":
         dotenv_path = pathlib.Path(filename)
         if not dotenv_path.exists() or not dotenv_path.is_file():
@@ -344,8 +321,7 @@ class SecretDefinition:
                 values[key] = value
         if not values:
             raise ValueError(f"Secret dotenv file has no key=value entries: {dotenv_path}")
-        resolved_name = _normalize_secret_name(name) if name is not None else _generated_secret_name("dotenv", values)
-        return cls(resolved_name, values=values, required_keys=required_keys, source="dotenv")
+        return cls(_generated_secret_name("dotenv", values), values=values, source="dotenv")
 
     def ref(self) -> dict[str, Any]:
         out = {"name": self.name}
@@ -361,27 +337,15 @@ class Secret:
 
     @staticmethod
     def from_dict(
-        name_or_env_dict: str | dict[str, Any],
-        env_dict: Optional[dict[str, Any]] = None,
-        *,
-        required_keys: Optional[list[str]] = None,
-        name: Optional[str] = None,
+        env_dict: dict[str, Any],
     ) -> SecretDefinition:
-        return SecretDefinition.from_dict(
-            name_or_env_dict,
-            env_dict,
-            required_keys=required_keys,
-            name=name,
-        )
+        return SecretDefinition.from_dict(env_dict)
 
     @staticmethod
     def from_dotenv(
-        name: Optional[str] = None,
         filename: str = ".env",
-        *,
-        required_keys: Optional[list[str]] = None,
     ) -> SecretDefinition:
-        return SecretDefinition.from_dotenv(name, filename=filename, required_keys=required_keys)
+        return SecretDefinition.from_dotenv(filename=filename)
 
 
 def _normalize_runtime_env_map(raw_env: Optional[dict[str, Any]]) -> dict[str, str]:
@@ -403,7 +367,24 @@ def _normalize_runtime_secrets(raw_secrets: Optional[list[Any]]) -> tuple[list[d
         raise ValueError("runtime(secrets=...) expects a list")
     refs: list[dict[str, Any]] = []
     definitions: list[SecretDefinition] = []
-    seen_names: set[str] = set()
+    seen_by_name: dict[str, SecretDefinition] = {}
+    next_suffix_by_base: dict[str, int] = {}
+
+    def _equivalent(a: SecretDefinition, b: SecretDefinition) -> bool:
+        return (
+            a.values == b.values
+            and a.required_keys == b.required_keys
+            and a.source == b.source
+        )
+
+    def _suffixed_name(base_name: str, suffix_number: int) -> str:
+        suffix = f"-{suffix_number}"
+        max_base_len = max(2, 64 - len(suffix))
+        trimmed_base = base_name[:max_base_len].rstrip("-_")
+        if len(trimmed_base) < 2:
+            trimmed_base = (base_name[:max_base_len] or "sdk").ljust(2, "x")
+        return _normalize_secret_name(f"{trimmed_base}{suffix}")
+
     for item in raw_secrets:
         if isinstance(item, SecretDefinition):
             definition = item
@@ -416,11 +397,30 @@ def _normalize_runtime_secrets(raw_secrets: Optional[list[Any]]) -> tuple[list[d
             )
         else:
             raise ValueError("runtime(secrets=...) items must be SecretDefinition, str, or dict")
-        if definition.name in seen_names:
-            continue
-        seen_names.add(definition.name)
-        refs.append(definition.ref())
-        definitions.append(definition)
+        base_name = definition.name
+        next_suffix_by_base.setdefault(base_name, 2)
+        candidate = definition
+        while True:
+            existing = seen_by_name.get(candidate.name)
+            if existing is None:
+                seen_by_name[candidate.name] = candidate
+                refs.append(candidate.ref())
+                definitions.append(candidate)
+                break
+            if _equivalent(existing, candidate):
+                break
+            # Keep first reference-only declarations for the same name, matching
+            # historical behavior for Secret.from_name(...) duplicates.
+            if existing.values is None or candidate.values is None:
+                break
+            suffix_number = next_suffix_by_base[base_name]
+            next_suffix_by_base[base_name] = suffix_number + 1
+            candidate = SecretDefinition(
+                _suffixed_name(base_name, suffix_number),
+                values=candidate.values,
+                required_keys=candidate.required_keys,
+                source=candidate.source,
+            )
     return refs, definitions
 
 
@@ -756,6 +756,100 @@ def event_envelope(
     }
 
 
+# =============================================================================
+# TODO(ARA-SDK-WEB-ENDPOINTS): Add @ara.asgi_app and @ara.wsgi_app support.
+# -----------------------------------------------------------------------------
+# This SDK pass intentionally implements only @ara.fastapi_endpoint to keep the
+# first HTTP endpoint abstraction narrow and predictable.
+#
+# Planned follow-ups:
+# - @ara.asgi_app(...) for mounting full FastAPI/Starlette applications
+# - @ara.wsgi_app(...) for Flask/Django compatibility
+# - endpoint router manifest shape compatible with all three endpoint types
+# =============================================================================
+def _normalize_fastapi_endpoint_spec(spec: Any, *, default_label: str = "") -> dict[str, Any]:
+    if not isinstance(spec, dict):
+        raise ValueError("fastapi_endpoint(...) expects a configuration dict")
+
+    method = str(spec.get("method") or "POST").strip().upper() or "POST"
+    if method not in ALLOWED_FASTAPI_ENDPOINT_METHODS:
+        allowed = ", ".join(sorted(ALLOWED_FASTAPI_ENDPOINT_METHODS))
+        raise ValueError(f"fastapi_endpoint(method=...) must be one of: {allowed}")
+
+    raw_label = str(spec.get("label") or default_label or "").strip()
+    normalized_label = _slugify(raw_label)
+    if not normalized_label:
+        raise ValueError(
+            "fastapi_endpoint(...) requires a non-empty label or a function name "
+            "that can be slugified"
+        )
+
+    path_value = str(spec.get("path") or "").strip()
+    if path_value:
+        if not path_value.startswith("/"):
+            path_value = f"/{path_value}"
+        path_value = re.sub(r"/{2,}", "/", path_value)
+    else:
+        path_value = f"/{normalized_label}"
+
+    auth_mode = str(spec.get("auth") or "none").strip().lower() or "none"
+    if auth_mode not in ALLOWED_ENDPOINT_AUTH_MODES:
+        allowed = ", ".join(sorted(ALLOWED_ENDPOINT_AUTH_MODES))
+        raise ValueError(f"fastapi_endpoint(auth=...) must be one of: {allowed}")
+
+    auth_header_name = str(spec.get("auth_header_name") or "").strip()
+    if auth_mode == "header" and not auth_header_name:
+        auth_header_name = "X-Ara-Endpoint-Secret"
+
+    auth_secret_env = str(spec.get("auth_secret_env") or "").strip()
+    if auth_mode != "none" and not auth_secret_env:
+        auth_secret_env = f"ARA_ENDPOINT_{normalized_label.upper().replace('-', '_')}_SECRET"
+
+    return {
+        "type": "fastapi_endpoint",
+        "method": method,
+        "path": path_value,
+        "label": normalized_label,
+        "docs": bool(spec.get("docs", False)),
+        "auth": {
+            "mode": auth_mode,
+            "header_name": auth_header_name,
+            "secret_env": auth_secret_env,
+        },
+    }
+
+
+def fastapi_endpoint(
+    *,
+    method: str = "POST",
+    path: str = "",
+    label: str = "",
+    auth: str = "none",
+    auth_header_name: str = "",
+    auth_secret_env: str = "",
+    docs: bool = False,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    raw_spec = {
+        "method": method,
+        "path": path,
+        "label": label,
+        "auth": auth,
+        "auth_header_name": auth_header_name,
+        "auth_secret_env": auth_secret_env,
+        "docs": docs,
+    }
+
+    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+        endpoint_spec = _normalize_fastapi_endpoint_spec(raw_spec, default_label=fn.__name__)
+        setattr(fn, "__ara_fastapi_endpoint__", endpoint_spec)
+        existing_agent = getattr(fn, "__ara_agent__", None)
+        if isinstance(existing_agent, dict):
+            existing_agent["fastapi_endpoint"] = dict(endpoint_spec)
+        return fn
+
+    return decorator
+
+
 ScheduleRunSpec = dict[str, Any]
 ScheduleSpec = dict[str, Any]
 
@@ -961,6 +1055,9 @@ class App:
                 agent_row["runtime"] = runtime_cfg
             if isinstance(sandbox, dict) and sandbox:
                 agent_row["sandbox"] = dict(sandbox)
+            endpoint_cfg = getattr(fn, "__ara_fastapi_endpoint__", None)
+            if isinstance(endpoint_cfg, dict):
+                agent_row["fastapi_endpoint"] = dict(endpoint_cfg)
             self._upsert_agent(agent_row)
             if entrypoint or not self._default_agent_id:
                 self._default_agent_id = agent_id
@@ -1017,6 +1114,7 @@ class App:
     def manifest(self) -> dict[str, Any]:
         agent = dict(self._agent)
         workflows: list[dict[str, Any]] = []
+        fastapi_endpoint_rows: list[dict[str, Any]] = []
 
         if self._agents:
             agent_rows = [dict(row) for row in self._agents]
@@ -1031,6 +1129,12 @@ class App:
                 agent_id = str(row.get("id") or "").strip()
                 if not agent_id:
                     continue
+                endpoint_cfg = row.get("fastapi_endpoint") if isinstance(row.get("fastapi_endpoint"), dict) else None
+                if endpoint_cfg:
+                    endpoint_row = dict(endpoint_cfg)
+                    endpoint_row.setdefault("agent_id", agent_id)
+                    endpoint_row.setdefault("workflow_id", agent_id)
+                    fastapi_endpoint_rows.append(endpoint_row)
                 instructions = str(row.get("instructions") or row.get("task") or "").strip()
                 profile = {
                     "id": agent_id,
@@ -1102,13 +1206,24 @@ class App:
         if self._tools:
             agent["tools"] = list(self._tools)
 
+        interfaces_payload = dict(self._interfaces)
+        if fastapi_endpoint_rows:
+            existing_endpoint_rows = interfaces_payload.get("fastapi_endpoints")
+            merged_endpoint_rows: list[dict[str, Any]] = []
+            if isinstance(existing_endpoint_rows, list):
+                for item in existing_endpoint_rows:
+                    if isinstance(item, dict):
+                        merged_endpoint_rows.append(dict(item))
+            merged_endpoint_rows.extend(fastapi_endpoint_rows)
+            interfaces_payload["fastapi_endpoints"] = merged_endpoint_rows
+
         return {
             "name": self.name,
             "slug": self.slug,
             "description": "",
             "agent": agent,
             "workflows": workflows,
-            "interfaces": dict(self._interfaces),
+            "interfaces": interfaces_payload,
             "runtime_profile": dict(self._runtime_profile),
         }
 
@@ -2275,6 +2390,20 @@ class AraRuntimeClient:
             return path
         return f"{path}?{encoded}"
 
+    def session_start(self) -> dict[str, Any]:
+        return self.http._request("/session/start", method="POST", body={})
+
+    def session_status(self) -> dict[str, Any]:
+        return self.http._request("/session/status", method="GET")
+
+    def session_stop(self) -> dict[str, Any]:
+        result = self.http._request("/session/stop", method="POST", body={})
+        if result is None:
+            return {"ok": True}
+        if isinstance(result, dict):
+            return result
+        return {"ok": True, "result": result}
+
     def capabilities(self, *, session_id: str, agent_id: str = "") -> dict[str, Any]:
         path = self._with_query(
             "/session/runtime/capabilities",
@@ -2480,6 +2609,12 @@ def run_runtime_cli(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(description="Ara runtime CLI")
     sub = parser.add_subparsers(dest="scope", required=True)
 
+    p_session = sub.add_parser("session")
+    sub_session = p_session.add_subparsers(dest="command", required=True)
+    sub_session.add_parser("start")
+    sub_session.add_parser("status")
+    sub_session.add_parser("stop")
+
     p_cap = sub.add_parser("capabilities")
     p_cap.add_argument("--session", required=True)
     p_cap.add_argument("--agent", default="")
@@ -2516,6 +2651,18 @@ def run_runtime_cli(argv: Optional[list[str]] = None) -> None:
         client = AraRuntimeClient.from_env(cwd=os.getcwd())
     except RuntimeError as exc:
         raise SystemExit(f"ara runtime: {exc}") from None
+
+    if args.scope == "session" and args.command == "start":
+        print(json.dumps(client.session_start(), indent=2))
+        return
+
+    if args.scope == "session" and args.command == "status":
+        print(json.dumps(client.session_status(), indent=2))
+        return
+
+    if args.scope == "session" and args.command == "stop":
+        print(json.dumps(client.session_stop(), indent=2))
+        return
 
     if args.scope == "capabilities":
         print(

@@ -33,12 +33,10 @@ app = App(
     runtime_profile=runtime(
         secrets=[
             Secret.from_dict(
-                "resend-runtime",
                 {
                     "RESEND_API_KEY": _required_env_value("RESEND_API_KEY"),
                     "CRON_EMAIL_FROM": _required_env_value("CRON_EMAIL_FROM"),
-                },
-                required_keys=["RESEND_API_KEY", "CRON_EMAIL_FROM"],
+                }
             ),
         ],
     ),
@@ -106,8 +104,8 @@ def send_email(to: str, subject: str, body: str) -> dict:
         "automation_delete",
     ],
 )
-def demo_chat(payload: dict) -> str:
-    input_payload = payload if isinstance(payload, dict) else {}
+def demo_chat(input: dict) -> str:
+    input_payload = input if isinstance(input, dict) else {}
     intent = str(input_payload.get("intent") or "").strip().lower()
     if intent == "schedule-recurring-email":
         return """

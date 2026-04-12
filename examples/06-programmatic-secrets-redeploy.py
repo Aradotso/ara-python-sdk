@@ -17,7 +17,7 @@ def build_app(*, dotenv_file: str, local_openai_key: str) -> App:
     @app.agent(
         entrypoint=True,
     )
-    def probe_agent(payload: dict) -> str:
+    def probe_agent(input: dict) -> str:
         return "Respond with a short probe confirmation."
 
     return app

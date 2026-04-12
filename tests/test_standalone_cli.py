@@ -52,8 +52,9 @@ def test_standalone_cli_help_lists_top_level_commands(monkeypatch, capsys):
 
     out = capsys.readouterr().out
     assert "App commands (require <app_script.py>):" in out
-    assert "auth      login/whoami/logout for CLI auth" in out
+    assert "auth      login/whoami/logout/rotate for CLI auth" in out
     assert "runtime   runtime capabilities, tools, skills, and control APIs" in out
+    assert "session   start/status/stop authenticated cloud sessions" in out
 
 
 def test_standalone_cli_invalid_project_name_shows_dns_hint(tmp_path, monkeypatch):
@@ -131,6 +132,60 @@ def test_runtime_group_prints_group_help_without_subcommand(monkeypatch):
     sdk_main.main()
 
     assert captured["argv"] == ["--help"]
+
+
+def test_session_group_dispatches_without_app_script(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _run_runtime_cli(argv=None):
+        captured["argv"] = list(argv or [])
+
+    monkeypatch.setattr(sdk_main, "run_runtime_cli", _run_runtime_cli)
+    monkeypatch.setattr(
+        sdk_main.sys,
+        "argv",
+        ["ara", "session", "status"],
+    )
+
+    sdk_main.main()
+
+    assert captured["argv"] == ["session", "status"]
+
+
+def test_session_alias_dispatches_to_runtime_session(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _run_runtime_cli(argv=None):
+        captured["argv"] = list(argv or [])
+
+    monkeypatch.setattr(sdk_main, "run_runtime_cli", _run_runtime_cli)
+    monkeypatch.setattr(
+        sdk_main.sys,
+        "argv",
+        ["ara", "start"],
+    )
+
+    sdk_main.main()
+
+    assert captured["argv"] == ["session", "start"]
+
+
+def test_session_alias_forwards_trailing_args(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _run_runtime_cli(argv=None):
+        captured["argv"] = list(argv or [])
+
+    monkeypatch.setattr(sdk_main, "run_runtime_cli", _run_runtime_cli)
+    monkeypatch.setattr(
+        sdk_main.sys,
+        "argv",
+        ["ara", "status", "--json"],
+    )
+
+    sdk_main.main()
+
+    assert captured["argv"] == ["session", "status", "--json"]
 
 
 def test_auth_group_prints_group_help_without_subcommand(monkeypatch):

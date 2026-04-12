@@ -52,8 +52,8 @@ def title_case_decorator(text: str) -> dict:
     entrypoint=True,
     skills=["title_case_decorator"],
 )
-def title_case_agent(payload: dict) -> str:
-    input_payload = payload if isinstance(payload, dict) else {}
+def title_case_agent(input: dict) -> str:
+    input_payload = input if isinstance(input, dict) else {}
     text = str(input_payload.get("text") or input_payload.get("message") or "").strip()
     mode = str(input_payload.get("mode") or "").strip().lower()
     probe_requested = mode == "probe" or text.startswith("RELIABILITY_PROBE|")

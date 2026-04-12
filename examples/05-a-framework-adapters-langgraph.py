@@ -16,5 +16,5 @@ app = App(
         ),
     },
 )
-def message_router(payload: dict) -> str:
+def message_router(input: dict) -> str:
     return "Route incoming messages to the framework worker."

@@ -5,7 +5,7 @@ import urllib.error
 
 import pytest
 
-from ara_sdk import App, Secret, invoke, runtime, sandbox, schedule, scheduler
+from ara_sdk import App, Secret, fastapi_endpoint, invoke, runtime, sandbox, schedule, scheduler
 from ara_sdk import core
 
 
@@ -67,7 +67,7 @@ def test_agent_registers_profile_and_workflow():
 def test_agent_omits_skills_when_unspecified_and_strips_runtime_secret_defs():
     app = App("no-skills-agent-app")
     agent_runtime = runtime(
-        secrets=[Secret.from_dict("provider-local", {"OPENAI_API_KEY": "sk-test"})],
+        secrets=[Secret.from_dict({"OPENAI_API_KEY": "sk-test"})],
     )
 
     @app.agent(
@@ -109,6 +109,67 @@ def test_agent_rejects_removed_legacy_kwargs():
         app.agent(id="legacy-agent", instructions="legacy")
     with pytest.raises(TypeError):
         app.agent(id="legacy-agent", prompt_factory=True)
+
+
+def test_fastapi_endpoint_is_emitted_in_manifest_interfaces():
+    app = App("fastapi-endpoint-app")
+
+    @app.agent(id="ingest-agent")
+    @fastapi_endpoint(
+        method="post",
+        path="/hooks/inbound",
+        label="lead-intake",
+        auth="header",
+        auth_header_name="X-Endpoint-Key",
+        auth_secret_env="LEAD_INTAKE_SECRET",
+        docs=True,
+    )
+    def ingest(payload: dict) -> str:
+        return "Ingest inbound webhook payloads."
+
+    manifest = app.manifest
+    endpoint_rows = manifest["interfaces"]["fastapi_endpoints"]
+    assert len(endpoint_rows) == 1
+    endpoint = endpoint_rows[0]
+    assert endpoint["type"] == "fastapi_endpoint"
+    assert endpoint["method"] == "POST"
+    assert endpoint["path"] == "/hooks/inbound"
+    assert endpoint["label"] == "lead-intake"
+    assert endpoint["docs"] is True
+    assert endpoint["agent_id"] == "ingest-agent"
+    assert endpoint["workflow_id"] == "ingest-agent"
+    assert endpoint["auth"]["mode"] == "header"
+    assert endpoint["auth"]["header_name"] == "X-Endpoint-Key"
+    assert endpoint["auth"]["secret_env"] == "LEAD_INTAKE_SECRET"
+
+
+def test_fastapi_endpoint_works_with_reversed_decorator_order():
+    app = App("fastapi-endpoint-reversed-order")
+
+    @fastapi_endpoint(auth="bearer")
+    @app.agent(id="router-agent")
+    def route(payload: dict) -> str:
+        return "Route inbound API requests."
+
+    endpoint_rows = app.manifest["interfaces"]["fastapi_endpoints"]
+    assert len(endpoint_rows) == 1
+    endpoint = endpoint_rows[0]
+    assert endpoint["agent_id"] == "router-agent"
+    assert endpoint["path"] == "/route"
+    assert endpoint["auth"]["mode"] == "bearer"
+    assert endpoint["auth"]["secret_env"] == "ARA_ENDPOINT_ROUTE_SECRET"
+
+
+def test_fastapi_endpoint_rejects_invalid_method_and_auth_mode():
+    with pytest.raises(ValueError, match="method"):
+        @fastapi_endpoint(method="TRACE")
+        def _bad_method(payload: dict) -> str:
+            return "noop"
+
+    with pytest.raises(ValueError, match="auth"):
+        @fastapi_endpoint(auth="mystery")
+        def _bad_auth(payload: dict) -> str:
+            return "noop"
 
 
 def _load_module_from_path(path) -> ModuleType:
@@ -313,18 +374,19 @@ def test_http_error_includes_response_body_in_debug_mode(monkeypatch):
 
 
 def test_runtime_includes_env_and_secret_refs():
+    local_secret = Secret.from_dict({"OPENAI_API_KEY": "sk-local"})
     profile = runtime(
         env={"APP_MODE": "production", "MAX_RETRIES": 3},
         secrets=[
             Secret.from_name("provider-shared", required_keys=["OPENAI_API_KEY"]),
-            Secret.from_dict("provider-local", {"OPENAI_API_KEY": "sk-local"}),
+            local_secret,
             "provider-shared",
         ],
     )
     assert profile["env"] == {"APP_MODE": "production", "MAX_RETRIES": "3"}
     assert profile["secret_refs"] == [
         {"name": "provider-shared", "required_keys": ["OPENAI_API_KEY"]},
-        {"name": "provider-local"},
+        {"name": local_secret.name},
     ]
     assert "__secret_definitions" in profile
     assert len(profile["__secret_definitions"]) == 2
@@ -366,25 +428,44 @@ def test_runtime_auth_resolution_ignores_local_key_files(monkeypatch, tmp_path):
 
 
 def test_runtime_duplicate_secret_name_keeps_first_definition():
+    local_secret = Secret.from_dict({"OPENAI_API_KEY": "sk-overwrite-attempt"})
     profile = runtime(
         secrets=[
-            Secret.from_name("provider-shared", required_keys=["OPENAI_API_KEY"]),
-            Secret.from_dict("provider-shared", {"OPENAI_API_KEY": "sk-overwrite-attempt"}),
+            Secret.from_name(local_secret.name, required_keys=["OPENAI_API_KEY"]),
+            local_secret,
         ],
     )
     assert profile["secret_refs"] == [
-        {"name": "provider-shared", "required_keys": ["OPENAI_API_KEY"]},
+        {"name": local_secret.name, "required_keys": ["OPENAI_API_KEY"]},
     ]
     definitions = profile["__secret_definitions"]
     assert len(definitions) == 1
     assert definitions[0].values is None
 
 
+def test_runtime_keeps_distinct_auto_named_local_secrets_with_same_keyset():
+    first = Secret.from_dict({"OPENAI_API_KEY": "sk-first"})
+    second = Secret.from_dict({"OPENAI_API_KEY": "sk-second"})
+    assert first.name == second.name
+
+    profile = runtime(secrets=[first, second])
+    refs = profile["secret_refs"]
+    definitions = profile["__secret_definitions"]
+
+    assert len(refs) == 2
+    assert len(definitions) == 2
+    assert refs[0]["name"] == first.name
+    assert refs[1]["name"] != refs[0]["name"]
+    assert refs[1]["name"].startswith(f"{first.name}-")
+    assert definitions[0].values == {"OPENAI_API_KEY": "sk-first"}
+    assert definitions[1].values == {"OPENAI_API_KEY": "sk-second"}
+
+
 def test_secret_rejects_reserved_keys():
     with pytest.raises(ValueError):
         runtime(env={"SESSION_ID": "abc"})
     with pytest.raises(ValueError):
-        Secret.from_dict("provider-local", {"ARA_INTERNAL_TOKEN": "abc"})
+        Secret.from_dict({"ARA_INTERNAL_TOKEN": "abc"})
 
 
 def test_secret_from_dotenv_and_dict(tmp_path):
@@ -397,19 +478,24 @@ def test_secret_from_dotenv_and_dict(tmp_path):
     dotenv_rotated.write_text("OPENAI_API_KEY=sk-456\nANTHROPIC_API_KEY=an-789\n", encoding="utf-8")
     assert Secret.from_dotenv(filename=str(dotenv_rotated)).name == auto_secret.name
 
-    secret = Secret.from_dotenv("provider-local", filename=str(dotenv))
-    assert secret.name == "provider-local"
-    assert secret.values == {"OPENAI_API_KEY": "sk-123", "ANTHROPIC_API_KEY": "an-123"}
+    named_keys_secret = Secret.from_dotenv(filename=str(dotenv))
+    assert named_keys_secret.values == {"OPENAI_API_KEY": "sk-123", "ANTHROPIC_API_KEY": "an-123"}
 
     dict_secret = Secret.from_dict({"FOO": "bar"})
     assert dict_secret.name.startswith("sdk-dict-")
     assert Secret.from_dict({"FOO": "bar"}).name == dict_secret.name
     assert Secret.from_dict({"FOO": "baz"}).name == dict_secret.name
-    with pytest.raises(ValueError, match="conflicts with name= keyword"):
-        Secret.from_dict("provider-local", {"FOO": "bar"}, name="provider-other")
-
-    explicit_dict_secret = Secret.from_dict("calendar", {"CAL_API_KEY": "cal-123"})
+    explicit_dict_secret = Secret.from_dict({"CAL_API_KEY": "cal-123"})
     assert explicit_dict_secret.values == {"CAL_API_KEY": "cal-123"}
+
+    with pytest.raises(TypeError):
+        Secret.from_dict("provider-local", {"FOO": "bar"})
+    with pytest.raises(TypeError):
+        Secret.from_dict({"FOO": "bar"}, name="provider-local")
+    with pytest.raises(TypeError):
+        Secret.from_dotenv("provider-local", filename=str(dotenv))
+    with pytest.raises(TypeError):
+        Secret.from_dotenv(filename=str(dotenv), required_keys=["OPENAI_API_KEY"])
 
 
 def test_secret_name_requires_two_or_more_characters():
@@ -567,10 +653,11 @@ def _manifest_with_runtime(runtime_profile: dict) -> dict:
 
 
 def test_deploy_syncs_local_secrets_before_warmup(tmp_path):
+    local_secret = Secret.from_dict({"OPENAI_API_KEY": "sk-local"})
     runtime_profile = runtime(
         env={"APP_MODE": "dev"},
         secrets=[
-            Secret.from_dict("provider-local", {"OPENAI_API_KEY": "sk-local"}),
+            local_secret,
             Secret.from_name("provider-shared", required_keys=["OPENAI_API_KEY"]),
         ],
     )
@@ -588,12 +675,12 @@ def test_deploy_syncs_local_secrets_before_warmup(tmp_path):
     assert fake_http.created_payload is not None
     assert "__secret_definitions" not in fake_http.created_payload["runtime_profile"]
     assert fake_http.created_payload["runtime_profile"]["secret_refs"] == [
-        {"name": "provider-local"},
+        {"name": local_secret.name},
         {"name": "provider-shared", "required_keys": ["OPENAI_API_KEY"]},
     ]
-    assert fake_http.calls.index("upsert_secret:provider-local") < fake_http.calls.index("run_app")
+    assert fake_http.calls.index(f"upsert_secret:{local_secret.name}") < fake_http.calls.index("run_app")
     assert out["secrets"] == {
-        "synced": ["provider-local"],
+        "synced": [local_secret.name],
         "referenced_only": ["provider-shared"],
     }
     assert out["runtime_key_created"] is True
@@ -602,7 +689,7 @@ def test_deploy_syncs_local_secrets_before_warmup(tmp_path):
 
 def test_deploy_surfaces_backend_secrets_route_compat_error(tmp_path):
     runtime_profile = runtime(
-        secrets=[Secret.from_dict("provider-local", {"OPENAI_API_KEY": "sk-local"})],
+        secrets=[Secret.from_dict({"OPENAI_API_KEY": "sk-local"})],
     )
     client = core.AraClient(
         manifest=_manifest_with_runtime(runtime_profile),

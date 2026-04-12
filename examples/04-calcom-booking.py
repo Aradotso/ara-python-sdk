@@ -25,8 +25,8 @@ app = App(
     ],
     sandbox=sandbox(max_concurrency=3),
 )
-def booking_coordinator(payload: dict) -> str:
-    input_payload = payload if isinstance(payload, dict) else {}
+def booking_coordinator(input: dict) -> str:
+    input_payload = input if isinstance(input, dict) else {}
     action = str(input_payload.get("action") or "").strip().lower()
     if action == "send-reminders":
         return "Send reminders for pending booking confirmations."

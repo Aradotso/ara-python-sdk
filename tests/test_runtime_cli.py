@@ -42,3 +42,35 @@ def test_runtime_cli_control_call_requires_action_with_clean_exit(monkeypatch, t
 
     with pytest.raises(SystemExit, match=r"ara runtime: control call requires --action"):
         sdk_core.run_runtime_cli(["control", "call", "--session", "sess-123"])
+
+
+def test_runtime_cli_session_lifecycle_commands(monkeypatch, tmp_path, capsys):
+    class _DummyRuntimeClient:
+        @classmethod
+        def from_env(cls, *, cwd=None):
+            _ = cwd
+            return cls()
+
+        def session_start(self):
+            return {"session_id": "sess-started"}
+
+        def session_status(self):
+            return {"sessionId": "sess-started"}
+
+        def session_stop(self):
+            return {"ok": True}
+
+    monkeypatch.setattr(sdk_core, "AraRuntimeClient", _DummyRuntimeClient)
+    monkeypatch.setattr(sdk_core.os, "getcwd", lambda: str(tmp_path))
+
+    sdk_core.run_runtime_cli(["session", "start"])
+    out = capsys.readouterr().out
+    assert '"session_id": "sess-started"' in out
+
+    sdk_core.run_runtime_cli(["session", "status"])
+    out = capsys.readouterr().out
+    assert '"sessionId": "sess-started"' in out
+
+    sdk_core.run_runtime_cli(["session", "stop"])
+    out = capsys.readouterr().out
+    assert '"ok": true' in out.lower()

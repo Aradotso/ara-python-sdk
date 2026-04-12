@@ -19,5 +19,5 @@ app = App(
         ),
     },
 )
-def followup_writer(payload: dict) -> str:
+def followup_writer(input: dict) -> str:
     return "Draft concise follow-up text for pending threads."
