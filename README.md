@@ -93,30 +93,7 @@ python -m pytest -q
 
 ## Run maintained examples
 
-All maintained examples are in `examples/` and ordered in `examples/README.md`.
-
-```bash
-cd examples
-cp .env.example .env.local
-# Fill ARA_API_KEY and provider keys in .env.local as needed.
-```
-
-Core flow per example:
-
-```bash
-ara deploy <example.py>
-ara setup-auth <example.py> --ensure-runtime-key true
-ara run <example.py> --agent <agent-id> --runtime-key "<runtime_key>" --message "hello"
-```
-
-Example-specific notes:
-
-- `01-c-agent-skills-loading.py` uses a local custom `@skill_handler` decorator inside the tool function; it is not an `ara-sdk` primitive.
-- `02-canonical-email-chat-cron.py` frontend requires `VITE_ARA_APP_ID` and `VITE_ARA_RUNTIME_KEY` in `examples/.env.local`.
-- `03-async-ngrok-webhook.py` requires both a local callback receiver and ngrok.
-- `07-app-schedule-decorator.py` is the static/declarative scheduling example (`@app.schedule(...)`).
-- `07b-app-schedule-decorator.py` is the runtime-managed fire-and-forget scheduling example (create jobs via `automation_create`) using an apply-style helper local to the example.
-- `07c-runtime-automation-manager.py` is the minimal runtime automation lifecycle manager (create/list/delete flows).
+Examples: [github.com/Aradotso/ara-python-sdk/tree/main/examples](https://github.com/Aradotso/ara-python-sdk/tree/main/examples)
 
 ## FAQ
 
