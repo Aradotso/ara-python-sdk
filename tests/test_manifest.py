@@ -435,6 +435,7 @@ def test_http_error_includes_response_body_in_debug_mode(monkeypatch):
 def test_runtime_includes_env_and_secret_refs():
     local_secret = Secret.from_dict({"OPENAI_API_KEY": "sk-local"})
     profile = runtime(
+        model="google/gemini-2.5-flash",
         env={"APP_MODE": "production", "MAX_RETRIES": 3},
         secrets=[
             Secret.from_name("provider-shared", required_keys=["OPENAI_API_KEY"]),
@@ -442,6 +443,7 @@ def test_runtime_includes_env_and_secret_refs():
             "provider-shared",
         ],
     )
+    assert profile["model"] == "google/gemini-2.5-flash"
     assert profile["env"] == {"APP_MODE": "production", "MAX_RETRIES": "3"}
     assert profile["secret_refs"] == [
         {"name": "provider-shared", "required_keys": ["OPENAI_API_KEY"]},

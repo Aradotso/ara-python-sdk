@@ -27,5 +27,6 @@ ara run <example.py> --agent <agent_id> --runtime-key "<runtime_key>" --message 
 11. `07-app-schedule-decorator.py` - static scheduling via `@app.schedule(...)`.
 12. `07b-app-schedule-decorator.py` - runtime-created schedule (fire-and-forget).
 13. `07c-runtime-automation-manager.py` - create/list/delete automation lifecycle.
+14. `09-runtime-model-selector.py` - minimal `runtime(model=...)` selector example.
 
 For full docs and walkthroughs: <https://docs.ara.so/examples/overview>

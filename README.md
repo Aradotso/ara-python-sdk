@@ -13,7 +13,7 @@ Main SDK primitives:
 - `@app.tool(...)`: expose deterministic functions as callable tools.
 - `@app.schedule(...)`: trigger agents/tools on cron or fixed times.
 - `@fastapi_endpoint(...)`: expose HTTP endpoints backed by app agents.
-- `runtime(...)` + `Secret`: declare runtime env, startup, and secrets.
+- `runtime(...)` + `Secret`: declare runtime env, startup, model selection, and secrets.
 
 These primitives can be combined to run always-on assistants, scheduled automation jobs, and API-triggered workflows in one app.
 

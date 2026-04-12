@@ -482,6 +482,7 @@ def runtime(
     files: Optional[list[dict[str, Any]]] = None,
     startup: Optional[dict[str, Any]] = None,
     image: Optional[str] = None,
+    model: Optional[str] = None,
     memory_mb: Optional[int] = None,
     volume_size_mb: Optional[int] = None,
     python_packages: Optional[list[str]] = None,
@@ -496,6 +497,9 @@ def runtime(
         profile["startup"] = dict(startup)
     if image:
         profile["image"] = str(image).strip()
+    model_name = str(model or "").strip()
+    if model_name:
+        profile["model"] = model_name
     if memory_mb is not None:
         profile["memory_mb"] = int(memory_mb)
     if volume_size_mb is not None:
