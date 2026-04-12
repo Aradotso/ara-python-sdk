@@ -47,6 +47,9 @@ Example-specific notes:
 - `01-c-agent-skills-loading.py` uses a local custom `@skill_handler` decorator inside the tool function; it is not an `ara-sdk` primitive.
 - `02-canonical-email-chat-cron.py` frontend requires `VITE_ARA_APP_ID` and `VITE_ARA_RUNTIME_KEY` in `examples/.env.local`.
 - `03-async-ngrok-webhook.py` requires both a local callback receiver and ngrok.
+- `07-app-schedule-decorator.py` is the static/declarative scheduling example (`@app.schedule(...)`).
+- `07b-app-schedule-decorator.py` is the runtime-managed fire-and-forget scheduling example (create jobs via `automation_create`) using an apply-style helper local to the example.
+- `07c-runtime-automation-manager.py` is the minimal runtime automation lifecycle manager (create/list/delete flows).
 
 ## Principles
 
@@ -76,7 +79,6 @@ def send_email(to: str, subject: str, body: str) -> dict:
     return {"ok": True, "to": to, "subject": subject}
 
 DAILY_FOLLOWUPS = schedule.cron(
-    id="daily-followups",
     expr="0 13 * * 1-5",
     timezone="UTC",
     run=invoke.agent("booking_coordinator", input={"message": "Send pending follow-ups."}),
@@ -84,7 +86,7 @@ DAILY_FOLLOWUPS = schedule.cron(
 
 @app.agent(
     entrypoint=True,
-    skills=["send_email", "automation_create", "automation_list"],
+    skills=["send_email", "automation_create", "automation_list", "automation_delete"],
     schedules=[DAILY_FOLLOWUPS],
 )
 def booking_coordinator(payload: dict) -> str:
@@ -93,7 +95,7 @@ def booking_coordinator(payload: dict) -> str:
     return "Coordinate scheduling requests."
 
 
-@app.agent(id="inbound_webhook_agent")
+@app.agent()
 @fastapi_endpoint(method="POST", path="/webhooks/inbound", auth="none")
 def inbound_webhook_agent(payload: dict) -> str:
     """Handle inbound FastAPI endpoint payloads."""
@@ -257,9 +259,40 @@ Backward compatibility is preserved by default. Non-shared placement only activa
 
 Use one schedule shape everywhere:
 
-- `schedule.cron(...)` / `schedule.every(...)` for static declarations on `@app.agent`
+- `@app.schedule(...)` for static declarations directly on `@app.agent` or `@app.tool`
+- `schedule.cron(...)` / `schedule.every(...)` remain supported for explicit schedule objects
 - `invoke.agent(...)` / `invoke.tool(...)` for schedule targets
 - `scheduler.create(spec)` for dynamic runtime automation payloads
+
+`@app.schedule(...)` supports:
+
+- `cron="0 9 * * 1-5"` for cron schedules
+- `at=[...]` for planned slots:
+  - `HH:MM` for daily UTC wall-clock runs
+  - `2026-04-11T16:45:00Z` for one-shot UTC timestamps
+  - 5-field cron strings when you want explicit control
+- multiple triggers in one decorator (for example `cron` + `at`)
+- one-shot ISO timestamps are represented as cron + one-shot metadata; if the slot is already past when deployed, first execution can occur on the next yearly recurrence
+
+For runtime-managed schedules (not declared in code), see:
+
+- `examples/07b-app-schedule-decorator.py`
+- `examples/07c-runtime-automation-manager.py`
+
+Example:
+
+```python
+@app.schedule(cron="0 9 * * 1-5", at=["14:30", "2026-04-11T16:45:00Z"])
+@app.agent()
+def ops_agent(input: dict) -> str:
+    return "Run operational checks."
+
+
+@app.schedule(cron="0 * * * *")
+@app.tool()
+def cleanup_cache(path: str = "/tmp/cache") -> dict:
+    return {"ok": True, "path": path}
+```
 
 ## JSON runtime input contract
 
@@ -304,6 +337,9 @@ See `examples/` for optional integrations and demo projects:
 - `examples/05-a-framework-adapters-langgraph.py`
 - `examples/05-b-framework-adapters-agno.py`
 - `examples/06-programmatic-secrets-redeploy.py` (live probe via `examples/06-programmatic-secrets-redeploy-test.py`)
+- `examples/07-app-schedule-decorator.py` (first-class `@app.schedule(...)` usage on agent + tool)
+- `examples/07b-app-schedule-decorator.py` (runtime-managed "fire-and-forget" schedule using an apply-style helper)
+- `examples/07c-runtime-automation-manager.py` (minimal runtime automation create/list/delete agent flows)
 
 ## Security
 

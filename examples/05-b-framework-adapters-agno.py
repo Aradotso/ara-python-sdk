@@ -1,8 +1,6 @@
 from ara_sdk import App, agno_adapter, sandbox, tarball_artifact
 
-app = App(
-    "framework-adapter-minimal-agno",
-)
+app = App("framework-adapter-minimal-agno")
 
 
 @app.agent(

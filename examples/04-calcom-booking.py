@@ -1,8 +1,6 @@
 from ara_sdk import App, invoke, sandbox, schedule
 
-app = App(
-    "meeting-booker",
-)
+app = App("meeting-booker")
 
 
 @app.agent(
@@ -10,7 +8,6 @@ app = App(
     handoff_to=["calendar-strategist"],
     schedules=[
         schedule.cron(
-            id="daily-followups",
             expr="0 13 * * 1-5",
             timezone="UTC",
             run=invoke.agent(

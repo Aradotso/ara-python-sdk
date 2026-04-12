@@ -22,6 +22,9 @@ Support assets live under `assets/` and frontend files under `frontend/`.
 8. `05-a-framework-adapters-langgraph.py`
 9. `05-b-framework-adapters-agno.py`
 10. `06-programmatic-secrets-redeploy.py`
+11. `07-app-schedule-decorator.py`
+12. `07b-app-schedule-decorator.py`
+13. `07c-runtime-automation-manager.py`
 
 ## 00 - Get Started
 
@@ -133,4 +136,56 @@ To validate real adapter execution paths, replace the demo artifact sources/entr
 ```bash
 cd examples
 python3 06-programmatic-secrets-redeploy-test.py
+```
+
+## 07 - Decorator-Based Scheduling (`@app.schedule`)
+
+Demonstrates first-class schedule declarations attached directly to both agents and tools:
+
+- fixed planned times with `at=[...]`
+- recurring schedules with cron (`cron="0 * * * *"`)
+- dynamic schedule add/drop via `automation_create`, `automation_list`, and `automation_delete`
+
+```bash
+cd examples
+ara deploy 07-app-schedule-decorator.py
+ara setup 07-app-schedule-decorator.py
+ara setup-auth 07-app-schedule-decorator.py --ensure-runtime-key true
+# Trigger the entrypoint agent manually as well:
+ara run 07-app-schedule-decorator.py --agent ops_scheduler_agent --runtime-key "<runtime_key>" --message "run checks now"
+```
+
+## 07b - Runtime-Managed Scheduling (Fire-and-Forget)
+
+Demonstrates one dynamic schedule created at runtime with `automation_create`
+(not static `@app.schedule` declarations in code), using an apply-style helper that mirrors decorator timing fields.
+
+```bash
+cd examples
+ara deploy 07b-app-schedule-decorator.py
+ara setup 07b-app-schedule-decorator.py
+ara setup-auth 07b-app-schedule-decorator.py --ensure-runtime-key true
+
+# Create one runtime cron job that triggers the cleanup_cache tool.
+ara run 07b-app-schedule-decorator.py --agent runtime_schedule_manager --runtime-key "<runtime_key>" --message "create the runtime schedule"
+```
+
+## 07c - Runtime Automation Manager (Create/List/Delete)
+
+Demonstrates minimal automation lifecycle agents:
+
+- `create_then_list_agent` (entrypoint): create one job, then list jobs
+- `list_delete_list_agent`: list, delete by name->id lookup, list again
+
+```bash
+cd examples
+ara deploy 07c-runtime-automation-manager.py
+ara setup 07c-runtime-automation-manager.py
+ara setup-auth 07c-runtime-automation-manager.py --ensure-runtime-key true
+
+# Create and list
+ara run 07c-runtime-automation-manager.py --agent create_then_list_agent --runtime-key "<runtime_key>" --message "run create/list flow"
+
+# List, delete target, list again
+ara run 07c-runtime-automation-manager.py --agent list_delete_list_agent --runtime-key "<runtime_key>" --input name=runtime-demo-job
 ```

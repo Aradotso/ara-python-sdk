@@ -69,6 +69,7 @@ MAGIC_NUMBER_SPAWN_HARD_MAX_EPHEMERAL_TTL_MINUTES = 240
 ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 SECRET_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}[a-z0-9]$")
 PROJECT_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+SCHEDULE_AT_TIME_RE = re.compile(r"^(?P<hour>\d{1,2}):(?P<minute>\d{2})$")
 RESERVED_ENV_KEYS = frozenset({"SESSION_ID", "USER_ID", "APP_ID"})
 RESERVED_ENV_PREFIXES = ("ARA_", "MODAL_")
 logger = logging.getLogger(__name__)
@@ -904,13 +905,23 @@ def _normalize_schedule_spec(spec: Any) -> ScheduleSpec:
         if not expr:
             raise ValueError("cron schedule requires expr/cron")
         timezone_name = str(spec.get("timezone") or "UTC").strip() or "UTC"
-        return {
+        out = {
             "id": schedule_id,
             "kind": "cron",
             "cron": expr,
             "timezone": timezone_name,
             "run": run,
         }
+        raw_one_shot_at = spec.get("one_shot_at")
+        if raw_one_shot_at is not None and str(raw_one_shot_at).strip():
+            try:
+                parsed_one_shot_at = datetime.fromisoformat(str(raw_one_shot_at).strip().replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError("cron schedule one_shot_at must be a valid ISO8601 timestamp") from exc
+            if parsed_one_shot_at.tzinfo is None:
+                parsed_one_shot_at = parsed_one_shot_at.replace(tzinfo=timezone.utc)
+            out["one_shot_at"] = parsed_one_shot_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        return out
     seconds_raw = spec.get("every_seconds", spec.get("seconds"))
     try:
         seconds = int(seconds_raw)
@@ -924,6 +935,168 @@ def _normalize_schedule_spec(spec: Any) -> ScheduleSpec:
         "every_seconds": seconds,
         "run": run,
     }
+
+
+def _schedule_entry_suffix(raw: str, fallback: str) -> str:
+    suffix = _slugify(raw)
+    return suffix or fallback
+
+
+def _cron_from_at_token(raw_token: Any, *, default_timezone_name: str) -> dict[str, Any]:
+    token = str(raw_token or "").strip()
+    if not token:
+        raise ValueError("app.schedule(at=...) entries cannot be empty")
+    if len(token.split()) == 5:
+        return {
+            "kind": "cron",
+            "cron": token,
+            "timezone": default_timezone_name,
+        }
+    time_match = SCHEDULE_AT_TIME_RE.match(token)
+    if time_match:
+        hour = int(time_match.group("hour"))
+        minute = int(time_match.group("minute"))
+        if hour > 23 or minute > 59:
+            raise ValueError("app.schedule(at=...) HH:MM values must be within 00:00-23:59")
+        return {
+            "kind": "cron",
+            "cron": f"{minute} {hour} * * *",
+            "timezone": default_timezone_name,
+        }
+    try:
+        dt = datetime.fromisoformat(token.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(
+            "app.schedule(at=...) entries must be HH:MM, 5-field cron, or ISO8601 timestamp"
+        ) from exc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt_utc = dt.astimezone(timezone.utc)
+    # ISO one-shot tokens are represented as cron + one_shot_at metadata.
+    # If the computed cron slot is already in the past at deploy time, the next fire can be the
+    # next yearly recurrence before the one-shot disable guard runs.
+    return {
+        "kind": "cron",
+        "cron": f"{dt_utc.minute} {dt_utc.hour} {dt_utc.day} {dt_utc.month} *",
+        "timezone": "UTC",
+        "one_shot_at": dt_utc.isoformat().replace("+00:00", "Z"),
+    }
+
+
+def _normalize_schedule_entries_for_decorator(
+    *,
+    id: str,
+    cron: str,
+    at: Optional[list[Any]],
+    timezone_name: str,
+    run: Optional[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    schedule_base_id = _slugify(id)
+    if not schedule_base_id:
+        raise ValueError("app.schedule(...) requires a non-empty id or function name")
+
+    sources: list[tuple[str, dict[str, Any]]] = []
+    cron_expr = str(cron or "").strip()
+    if cron_expr:
+        sources.append(
+            (
+                "cron",
+                {
+                    "kind": "cron",
+                    "cron": cron_expr,
+                    "timezone": timezone_name,
+                },
+            )
+        )
+    for index, token in enumerate(at or [], start=1):
+        cron_from_at = _cron_from_at_token(token, default_timezone_name=timezone_name)
+        sources.append(
+            (
+                _schedule_entry_suffix(str(token), f"at-{index}"),
+                cron_from_at,
+            )
+        )
+
+    if not sources:
+        raise ValueError("app.schedule(...) requires at least one of cron= or at=")
+
+    normalized_run = _normalize_schedule_run(run) if isinstance(run, dict) else None
+    use_suffixes = len(sources) > 1
+    out: list[dict[str, Any]] = []
+    for suffix, base in sources:
+        schedule_id = schedule_base_id if not use_suffixes else f"{schedule_base_id}--{suffix}"
+        candidate: dict[str, Any] = {"id": schedule_id, **base}
+        # Validate schedule shape now using a temporary placeholder run.
+        probe = dict(candidate)
+        probe["run"] = {"type": "agent", "agent_id": "__schedule_placeholder__"}
+        normalized_probe = _normalize_schedule_spec(probe)
+        entry = {
+            "id": normalized_probe["id"],
+            "kind": normalized_probe["kind"],
+        }
+        if normalized_probe["kind"] == "cron":
+            entry["cron"] = normalized_probe["cron"]
+            entry["timezone"] = normalized_probe.get("timezone") or "UTC"
+            if normalized_probe.get("one_shot_at"):
+                entry["one_shot_at"] = str(normalized_probe["one_shot_at"])
+        if normalized_run is not None:
+            entry["run"] = dict(normalized_run)
+        out.append(entry)
+    return out
+
+
+def _bind_schedule_entries_to_target(
+    entries: list[dict[str, Any]],
+    *,
+    target_kind: str,
+    target_id: str,
+) -> list[dict[str, Any]]:
+    normalized_specs: list[dict[str, Any]] = []
+    for raw in entries:
+        if not isinstance(raw, dict):
+            continue
+        base = {
+            "id": str(raw.get("id") or "").strip(),
+            "kind": str(raw.get("kind") or "").strip().lower(),
+        }
+        if base["kind"] == "cron":
+            base["cron"] = str(raw.get("cron") or "").strip()
+            base["timezone"] = str(raw.get("timezone") or "UTC").strip() or "UTC"
+            if raw.get("one_shot_at") is not None:
+                base["one_shot_at"] = raw.get("one_shot_at")
+        else:
+            base["every_seconds"] = int(raw.get("every_seconds", 0) or 0)
+
+        run = raw.get("run") if isinstance(raw.get("run"), dict) else None
+        if run is None:
+            if target_kind == "agent":
+                run = invoke.agent(target_id)
+            elif target_kind == "tool":
+                run = invoke.tool(target_id)
+            else:
+                raise ValueError(f"Unsupported schedule target kind: {target_kind}")
+        spec = _normalize_schedule_spec({**base, "run": run})
+        normalized_specs.append(spec)
+    return normalized_specs
+
+
+def _merge_schedule_specs(
+    existing: Optional[list[dict[str, Any]]],
+    incoming: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = [dict(item) for item in (existing or []) if isinstance(item, dict)]
+    index_by_id = {str(item.get("id") or ""): idx for idx, item in enumerate(out)}
+    for item in incoming:
+        schedule_id = str(item.get("id") or "").strip()
+        if not schedule_id:
+            continue
+        idx = index_by_id.get(schedule_id)
+        if idx is None:
+            index_by_id[schedule_id] = len(out)
+            out.append(dict(item))
+            continue
+        out[idx] = dict(item)
+    return out
 
 
 def _schedule_spec_to_automation_args(spec: Any) -> dict[str, Any]:
@@ -972,6 +1145,7 @@ class App:
         self._agents: list[dict[str, Any]] = []
         self._tools: list[dict[str, Any]] = []
         self._default_agent_id: str = ""
+        self._schedule_agent_fallback_id = "scheduled-jobs"
 
     def _upsert_agent(self, item: dict[str, Any]) -> None:
         item_id = str(item.get("id") or "").strip()
@@ -982,6 +1156,30 @@ class App:
                 self._agents[idx] = item
                 return
         self._agents.append(item)
+
+    def _upsert_tool(self, item: dict[str, Any]) -> None:
+        function_block = item.get("function") if isinstance(item.get("function"), dict) else {}
+        tool_id = str(function_block.get("name") or "").strip()
+        if not tool_id:
+            return
+        for idx, existing in enumerate(self._tools):
+            existing_fn = existing.get("function") if isinstance(existing.get("function"), dict) else {}
+            existing_name = str(existing_fn.get("name") or "").strip()
+            if existing_name == tool_id:
+                self._tools[idx] = item
+                return
+        self._tools.append(item)
+
+    @staticmethod
+    def _get_fn_schedule_entries(fn: Callable[..., Any]) -> list[dict[str, Any]]:
+        raw = getattr(fn, "__ara_schedule_entries__", None)
+        if not isinstance(raw, list):
+            return []
+        return [dict(item) for item in raw if isinstance(item, dict)]
+
+    @staticmethod
+    def _set_fn_schedule_entries(fn: Callable[..., Any], entries: list[dict[str, Any]]) -> None:
+        setattr(fn, "__ara_schedule_entries__", [dict(item) for item in entries if isinstance(item, dict)])
 
     @staticmethod
     def _workflow_for_agent(agent_row: dict[str, Any], *, trigger: Optional[dict[str, Any]] = None, workflow_id: Optional[str] = None, task: Optional[str] = None) -> dict[str, Any]:
@@ -1000,6 +1198,35 @@ class App:
             "task": str(task or instructions or f"Run agent {agent_id}").strip(),
             "run": {},
             "pipeline": [],
+            "schedule": schedule_expr,
+            "trigger": trigger_cfg,
+        }
+
+    @staticmethod
+    def _workflow_for_tool_schedule(
+        *,
+        workflow_id: str,
+        anchor_agent_id: str,
+        tool_name: str,
+        tool_args: Optional[dict[str, Any]] = None,
+        trigger: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        trigger_cfg = dict(trigger or {"type": "api"})
+        schedule_expr = str(trigger_cfg.get("cron") or trigger_cfg.get("schedule") or "").strip()
+        return {
+            "id": str(workflow_id),
+            "mode": "pipeline",
+            "agent_id": str(anchor_agent_id),
+            "task": f"Run scheduled tool {tool_name}",
+            "run": {},
+            "pipeline": [
+                {
+                    "id": f"{workflow_id}--tool",
+                    "kind": "tool",
+                    "tool_name": str(tool_name),
+                    "args": dict(tool_args or {}),
+                }
+            ],
             "schedule": schedule_expr,
             "trigger": trigger_cfg,
         }
@@ -1036,6 +1263,14 @@ class App:
             normalized_schedules: list[dict[str, Any]] = []
             for schedule_item in schedules or []:
                 normalized_schedules.append(_normalize_schedule_spec(schedule_item))
+            pending_schedule_entries = self._get_fn_schedule_entries(fn)
+            if pending_schedule_entries:
+                pending_bound = _bind_schedule_entries_to_target(
+                    pending_schedule_entries,
+                    target_kind="agent",
+                    target_id=agent_id,
+                )
+                normalized_schedules = _merge_schedule_specs(normalized_schedules, pending_bound)
             agent_row: dict[str, Any] = {
                 "id": agent_id,
                 "task": task_text,
@@ -1095,17 +1330,74 @@ class App:
                 "function_name": fn.__name__,
                 "source": source,
             }
-            replaced = False
-            for idx, existing in enumerate(self._tools):
-                existing_fn = existing.get("function") if isinstance(existing.get("function"), dict) else {}
-                existing_name = str(existing_fn.get("name") or "").strip()
-                if existing_name == tool_id:
-                    self._tools[idx] = item
-                    replaced = True
-                    break
-            if not replaced:
-                self._tools.append(item)
+            pending_schedule_entries = self._get_fn_schedule_entries(fn)
+            if pending_schedule_entries:
+                item["schedules"] = _bind_schedule_entries_to_target(
+                    pending_schedule_entries,
+                    target_kind="tool",
+                    target_id=tool_id,
+                )
+            self._upsert_tool(item)
             setattr(fn, "__ara_tool__", item)
+            return fn
+
+        return decorator
+
+    def schedule(
+        self,
+        *,
+        id: str = "",
+        cron: str = "",
+        at: Optional[list[Any]] = None,
+        timezone: str = "UTC",
+        run: Optional[dict[str, Any]] = None,
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        timezone_name = str(timezone or "UTC").strip() or "UTC"
+
+        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+            schedule_id = str(id or fn.__name__).strip()
+            at_values: Optional[list[Any]]
+            if at is None:
+                at_values = None
+            elif isinstance(at, list):
+                at_values = list(at)
+            else:
+                at_values = [at]
+
+            entries = _normalize_schedule_entries_for_decorator(
+                id=schedule_id,
+                cron=str(cron or "").strip(),
+                at=at_values,
+                timezone_name=timezone_name,
+                run=run,
+            )
+            existing_entries = self._get_fn_schedule_entries(fn)
+            merged_entries = _merge_schedule_specs(existing_entries, entries)
+            self._set_fn_schedule_entries(fn, merged_entries)
+
+            existing_agent = getattr(fn, "__ara_agent__", None)
+            if isinstance(existing_agent, dict):
+                agent_id = str(existing_agent.get("id") or fn.__name__).strip()
+                bound = _bind_schedule_entries_to_target(entries, target_kind="agent", target_id=agent_id)
+                existing_agent["schedules"] = _merge_schedule_specs(existing_agent.get("schedules"), bound)
+                self._upsert_agent(existing_agent)
+
+            existing_tool = getattr(fn, "__ara_tool__", None)
+            if isinstance(existing_tool, dict):
+                fn_block = existing_tool.get("function") if isinstance(existing_tool.get("function"), dict) else {}
+                tool_id = str(fn_block.get("name") or fn.__name__).strip()
+                bound = _bind_schedule_entries_to_target(entries, target_kind="tool", target_id=tool_id)
+                existing_tool["schedules"] = _merge_schedule_specs(existing_tool.get("schedules"), bound)
+                self._upsert_tool(existing_tool)
+
+            if existing_agent is None and existing_tool is None:
+                logger.warning(
+                    "@app.schedule applied to %r which has no @app.agent or @app.tool decorator. "
+                    "Schedule entries are stored but will not appear in the manifest. "
+                    "Ensure @app.schedule is paired with @app.agent or @app.tool.",
+                    fn.__name__,
+                )
+
             return fn
 
         return decorator
@@ -1115,11 +1407,42 @@ class App:
         agent = dict(self._agent)
         workflows: list[dict[str, Any]] = []
         fastapi_endpoint_rows: list[dict[str, Any]] = []
+        agent_rows = [dict(row) for row in self._agents]
+        tool_schedule_specs: list[dict[str, Any]] = []
+        for tool in self._tools:
+            schedules = tool.get("schedules") if isinstance(tool.get("schedules"), list) else []
+            for raw_schedule in schedules:
+                if isinstance(raw_schedule, dict):
+                    tool_schedule_specs.append(_normalize_schedule_spec(raw_schedule))
 
-        if self._agents:
-            agent_rows = [dict(row) for row in self._agents]
+        if tool_schedule_specs:
+            if not agent_rows:
+                agent_rows.append(
+                    {
+                        "id": self._schedule_agent_fallback_id,
+                        "task": "Execute scheduled tool jobs.",
+                        "instructions": "Execute scheduled tool jobs.",
+                        "persona": "Execute scheduled tool jobs.",
+                        "schedules": [],
+                        "handoff_to": [],
+                        "always_on": False,
+                        "entrypoint": False,
+                    }
+                )
+            anchor_agent_id = str(self._default_agent_id or agent_rows[0].get("id") or "").strip()
+            anchor_index = 0
+            for idx, row in enumerate(agent_rows):
+                if str(row.get("id") or "").strip() == anchor_agent_id:
+                    anchor_index = idx
+                    break
+            anchor_row = dict(agent_rows[anchor_index])
+            existing = anchor_row.get("schedules") if isinstance(anchor_row.get("schedules"), list) else []
+            anchor_row["schedules"] = _merge_schedule_specs(existing, tool_schedule_specs)
+            agent_rows[anchor_index] = anchor_row
+
+        if agent_rows:
             agent["agents"] = agent_rows
-            default_agent_id = str(self._default_agent_id or self._agents[0].get("id") or "").strip()
+            default_agent_id = str(self._default_agent_id or agent_rows[0].get("id") or "").strip()
             if default_agent_id:
                 agent["default_agent_id"] = default_agent_id
 
@@ -1168,13 +1491,6 @@ class App:
                         continue
                     schedule_run = normalized_schedule.get("run") if isinstance(normalized_schedule.get("run"), dict) else {}
                     schedule_run_type = str(schedule_run.get("type") or "").strip().lower()
-                    run_agent_id = str(schedule_run.get("agent_id") or agent_id).strip() if schedule_run_type == "agent" else agent_id
-                    schedule_run_input = schedule_run.get("input")
-                    schedule_message = ""
-                    if isinstance(schedule_run_input, dict):
-                        schedule_message = str(schedule_run_input.get("message") or "").strip()
-                    elif isinstance(schedule_run_input, str):
-                        schedule_message = schedule_run_input.strip()
                     workflow_id = f"{agent_id}--{normalized_schedule['id']}"
                     trigger = {
                         "type": "cron",
@@ -1182,6 +1498,30 @@ class App:
                         "schedule": str(normalized_schedule.get("cron") or "").strip(),
                         "timezone": str(normalized_schedule.get("timezone") or "UTC").strip() or "UTC",
                     }
+                    if normalized_schedule.get("one_shot_at"):
+                        trigger["one_shot_at"] = str(normalized_schedule.get("one_shot_at"))
+                    if schedule_run_type == "tool":
+                        tool_name = str(schedule_run.get("tool_name") or "").strip()
+                        if not tool_name:
+                            continue
+                        tool_args = schedule_run.get("args") if isinstance(schedule_run.get("args"), dict) else {}
+                        workflows.append(
+                            self._workflow_for_tool_schedule(
+                                workflow_id=workflow_id,
+                                anchor_agent_id=agent_id,
+                                tool_name=tool_name,
+                                tool_args=tool_args,
+                                trigger=trigger,
+                            )
+                        )
+                        continue
+                    run_agent_id = str(schedule_run.get("agent_id") or agent_id).strip()
+                    schedule_run_input = schedule_run.get("input")
+                    schedule_message = ""
+                    if isinstance(schedule_run_input, dict):
+                        schedule_message = str(schedule_run_input.get("message") or "").strip()
+                    elif isinstance(schedule_run_input, str):
+                        schedule_message = schedule_run_input.strip()
                     schedule_task = str(row.get("task") or instructions or f"Run agent {run_agent_id}").strip()
                     workflows.append(
                         self._workflow_for_agent(
@@ -1257,23 +1597,48 @@ class _Invoke:
 
 class _Schedule:
     @staticmethod
-    def cron(*, id: str, expr: str, timezone: str = "UTC", run: dict[str, Any]) -> dict[str, Any]:
+    def cron(
+        *,
+        expr: str,
+        run: dict[str, Any],
+        id: Optional[str] = None,
+        timezone: str = "UTC",
+    ) -> dict[str, Any]:
+        run_spec = dict(run or {})
+        run_kind = str(run_spec.get("type") or "").strip().lower()
+        if run_kind == "agent":
+            target_hint = str(run_spec.get("agent_id") or "").strip() or "agent"
+        elif run_kind == "tool":
+            target_hint = str(run_spec.get("tool_name") or "").strip() or "tool"
+        else:
+            target_hint = "run"
+        expr_slug = _slugify(str(expr or ""))[:24]
+        generated_id = f"{target_hint}-{expr_slug or 'cron'}"
         spec = {
-            "id": str(id or "").strip(),
+            "id": str(id or generated_id).strip(),
             "kind": "cron",
             "cron": str(expr or "").strip(),
             "timezone": str(timezone or "UTC").strip() or "UTC",
-            "run": dict(run or {}),
+            "run": run_spec,
         }
         return _normalize_schedule_spec(spec)
 
     @staticmethod
-    def every(*, id: str, seconds: int, run: dict[str, Any]) -> dict[str, Any]:
+    def every(*, seconds: int, run: dict[str, Any], id: Optional[str] = None) -> dict[str, Any]:
+        run_spec = dict(run or {})
+        run_kind = str(run_spec.get("type") or "").strip().lower()
+        if run_kind == "agent":
+            target_hint = str(run_spec.get("agent_id") or "").strip() or "agent"
+        elif run_kind == "tool":
+            target_hint = str(run_spec.get("tool_name") or "").strip() or "tool"
+        else:
+            target_hint = "run"
+        generated_id = f"{target_hint}-every-{int(seconds)}s"
         spec = {
-            "id": str(id or "").strip(),
+            "id": str(id or generated_id).strip(),
             "kind": "every",
             "every_seconds": int(seconds),
-            "run": dict(run or {}),
+            "run": run_spec,
         }
         return _normalize_schedule_spec(spec)
 

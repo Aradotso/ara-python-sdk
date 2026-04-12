@@ -1,8 +1,6 @@
 from ara_sdk import App, git_artifact, langgraph_adapter, sandbox
 
-app = App(
-    "framework-adapter-minimal-langgraph",
-)
+app = App("framework-adapter-minimal-langgraph")
 
 
 @app.agent(

@@ -241,9 +241,7 @@ def test_tool_uses_exact_function_name_when_id_omitted():
 def test_tool_supports_multiline_decorator_arguments():
     app = App("tooling-app")
 
-    @app.tool(
-        id="send_email",
-    )
+    @app.tool(id="send_email")
     def send_email(to: str):
         """Send an email payload."""
         return {"ok": True, "to": to}
@@ -256,7 +254,6 @@ def test_tool_supports_multiline_decorator_arguments():
 
 def test_schedule_and_scheduler_builders():
     job = schedule.every(
-        id="heartbeat",
         seconds=3600,
         run=invoke.tool("send_email", args={"to": "sveinung@ara.so", "subject": "hi", "body": "hello"}),
     )
@@ -264,13 +261,75 @@ def test_schedule_and_scheduler_builders():
     assert payload["tool"] == "automation_create"
     assert payload["args"]["execution_kind"] == "app_tool_call"
     assert payload["args"]["app_id"] == "app_demo_1"
+    assert payload["args"]["name"] == "send_email-every-3600s"
     assert payload["args"]["tool_name"] == "send_email"
+
+
+def test_app_schedule_decorator_binds_multiple_triggers_to_agent():
+    app = App("schedule-decorator-agent-app")
+
+    @app.schedule(
+        cron="0 9 * * 1-5",
+        at=["14:30", "2026-04-11T16:45:00Z"],
+    )
+    @app.agent(entrypoint=True)
+    def planner(input: dict) -> str:
+        return f"Plan jobs from input: {input}"
+
+    manifest = app.manifest
+    agent_row = next(row for row in manifest["agent"]["agents"] if row["id"] == "planner")
+    schedules = agent_row["schedules"]
+    assert len(schedules) == 3
+    assert {s["kind"] for s in schedules} == {"cron"}
+    for schedule_spec in schedules:
+        assert schedule_spec["run"]["type"] == "agent"
+        assert schedule_spec["run"]["agent_id"] == "planner"
+
+    schedule_ids = {s["id"] for s in schedules}
+    assert "planner--cron" in schedule_ids
+    one_shot_schedule = next(s for s in schedules if s.get("one_shot_at"))
+    assert one_shot_schedule["one_shot_at"] == "2026-04-11T16:45:00Z"
+
+
+def test_app_schedule_decorator_binds_tool_and_emits_pipeline_workflow():
+    app = App("schedule-decorator-tool-app")
+
+    @app.agent(entrypoint=True)
+    def ops(input: dict) -> str:
+        return f"Ops agent: {input}"
+
+    @app.schedule(at=["03:15"])
+    @app.tool()
+    def cleanup_cache(path: str = "/tmp/cache") -> dict:
+        return {"ok": True, "path": path}
+
+    manifest = app.manifest
+    agent_row = next(row for row in manifest["agent"]["agents"] if row["id"] == "ops")
+    schedules = agent_row["schedules"]
+    assert len(schedules) == 1
+    schedule_spec = schedules[0]
+    assert schedule_spec["kind"] == "cron"
+    assert schedule_spec["run"]["type"] == "tool"
+    assert schedule_spec["run"]["tool_name"] == "cleanup_cache"
+    assert schedule_spec["run"]["args"] == {}
+
+    scheduled_workflow = next(wf for wf in manifest["workflows"] if wf["id"] == "ops--cleanup-cache")
+    assert scheduled_workflow["mode"] == "pipeline"
+    assert scheduled_workflow["pipeline"][0]["tool_name"] == "cleanup_cache"
+
+
+def test_app_schedule_rejects_invalid_at_token():
+    app = App("schedule-invalid-at-app")
+
+    with pytest.raises(ValueError, match="at"):
+        @app.schedule(at=["not-a-time"])
+        def _bad_at_spec(input: dict) -> str:
+            return str(input)
 
 
 def test_schedule_rejects_legacy_agent_field():
     with pytest.raises(ValueError, match="invoke\\.agent\\(\\.\\.\\.\\) requires non-empty agent id"):
         schedule.cron(
-            id="daily",
             expr="0 9 * * *",
             run={"type": "agent", "agent": "booking-coordinator"},
         )

@@ -11,9 +11,7 @@ for parent in pathlib.Path(__file__).resolve().parents:
 
 from ara_sdk import App
 
-app = App(
-    "skill-inline-v1",
-)
+app = App("skill-inline-v1")
 
 
 @app.agent(
