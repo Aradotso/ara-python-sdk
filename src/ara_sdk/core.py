@@ -1960,6 +1960,84 @@ def _collect_oauth_callback_via_localhost(
     )
 
 
+def _collect_oauth_callback_via_polling(
+    *,
+    api_base_url: str,
+    provider: str,
+    code_challenge: str,
+    timeout_seconds: int,
+    open_browser: bool,
+) -> dict[str, str]:
+    auth_http = _Http(api_base_url, "")
+    start_payload = auth_http.cli_auth_device_start(
+        provider=provider,
+        code_challenge=code_challenge,
+        code_challenge_method="s256",
+        timeout_seconds=int(timeout_seconds or 180),
+    )
+    authorize_url = str(start_payload.get("authorize_url") or start_payload.get("verification_uri") or "").strip()
+    session_id = str(start_payload.get("session_id") or "").strip()
+    poll_token = str(start_payload.get("poll_token") or "").strip()
+    if not (authorize_url and session_id and poll_token):
+        raise RuntimeError("Polling login init failed: server returned incomplete session payload.")
+
+    print(f"Open this URL to sign in with {provider}:")
+    print(authorize_url)
+    if open_browser:
+        try:
+            webbrowser.open(authorize_url)
+        except Exception:
+            pass
+
+    interval_seconds = int(start_payload.get("interval_seconds") or 2)
+    interval_seconds = max(1, min(10, interval_seconds))
+    deadline = time.time() + max(30, int(timeout_seconds or 180))
+    seen_unknown_statuses: set[str] = set()
+    while time.time() <= deadline:
+        status_payload = auth_http.cli_auth_device_status(session_id=session_id, poll_token=poll_token)
+        status = str(status_payload.get("status") or "").strip().lower()
+        if status in {"pending", "waiting", "queued"}:
+            time.sleep(interval_seconds)
+            continue
+        if status == "approved":
+            auth_code = str(status_payload.get("auth_code") or "").strip()
+            redirect_uri = str(status_payload.get("redirect_uri") or "").strip()
+            if not auth_code or not redirect_uri:
+                raise RuntimeError("Polling login approved but callback payload was incomplete.")
+            return {
+                "code": auth_code,
+                "state": str(status_payload.get("state") or "").strip(),
+                "redirect_uri": redirect_uri,
+            }
+        if status in {"error", "failed", "denied"}:
+            detail = (
+                str(status_payload.get("error_description") or "").strip()
+                or str(status_payload.get("error") or "").strip()
+                or "OAuth login failed."
+            )
+            raise RuntimeError(f"OAuth login failed: {detail}")
+        if status == "expired":
+            raise RuntimeError("OAuth login expired before completion.")
+        if status == "consumed":
+            raise RuntimeError(
+                "OAuth login code already used. "
+                "Retry `ara auth login` if this was unexpected."
+            )
+        unknown_status = status or "<empty>"
+        if unknown_status not in seen_unknown_statuses:
+            print(
+                f"Warning: polling login returned unknown status '{unknown_status}', retrying.",
+                file=sys.stderr,
+            )
+            seen_unknown_statuses.add(unknown_status)
+        time.sleep(interval_seconds)
+
+    raise RuntimeError(
+        "No OAuth approval received before timeout. "
+        "Retry `ara auth login` or use `ara auth login --api-key <ARA_API_KEY>`."
+    )
+
+
 def _refresh_cli_jwt_credentials_if_needed(creds: dict[str, Any]) -> dict[str, Any]:
     auth_type = str(creds.get("auth_type") or "").strip().lower()
     if auth_type != "supabase_jwt":
@@ -2315,6 +2393,40 @@ class _Http:
 
     def cli_auth_config(self) -> dict[str, Any]:
         return self._request("/auth/cli/config", method="GET", auth_header="")
+
+    def cli_auth_device_start(
+        self,
+        *,
+        provider: str,
+        code_challenge: str,
+        code_challenge_method: str = "s256",
+        timeout_seconds: int = 180,
+    ) -> dict[str, Any]:
+        return self._request(
+            "/auth/cli/device/start",
+            method="POST",
+            auth_header="",
+            body={
+                "provider": provider,
+                "code_challenge": code_challenge,
+                "code_challenge_method": code_challenge_method,
+                "timeout_seconds": int(timeout_seconds or 180),
+            },
+        )
+
+    def cli_auth_device_status(
+        self,
+        *,
+        session_id: str,
+        poll_token: str,
+    ) -> dict[str, Any]:
+        query = urllib.parse.urlencode(
+            {
+                "session_id": str(session_id or "").strip(),
+                "poll_token": str(poll_token or "").strip(),
+            }
+        )
+        return self._request(f"/auth/cli/device/status?{query}", method="GET", auth_header="")
 
     def cli_whoami(self) -> dict[str, Any]:
         return self._request("/auth/cli/whoami", method="GET")
@@ -3117,6 +3229,12 @@ def run_auth_cli(argv: Optional[list[str]] = None) -> None:
     p_login.add_argument("--provider", default="google")
     p_login.add_argument("--timeout-seconds", type=int, default=180)
     p_login.add_argument("--no-browser", action="store_true")
+    p_login.add_argument(
+        "--auth-flow",
+        choices=["auto", "localhost", "poll"],
+        default="auto",
+        help="Login transport: localhost callback, polling-only, or auto fallback.",
+    )
     p_login.add_argument("--supabase-url", default="")
     p_login.add_argument("--supabase-anon-key", default="")
 
@@ -3235,18 +3353,37 @@ def run_auth_cli(argv: Optional[list[str]] = None) -> None:
     if provider not in _CLI_OAUTH_ALLOWED_PROVIDERS:
         allowed = ", ".join(sorted(_CLI_OAUTH_ALLOWED_PROVIDERS))
         raise SystemExit(f"ara auth: unsupported OAuth provider '{provider}'. Allowed providers: {allowed}.")
+    auth_flow = str(args.auth_flow or "auto").strip().lower() or "auto"
     code_verifier = _pkce_code_verifier()
     code_challenge = _pkce_code_challenge(code_verifier)
-    expected_state = secrets.token_urlsafe(32)
     try:
-        callback_payload = _collect_oauth_callback_via_localhost(
-            supabase_url=supabase_url,
-            provider=provider,
-            code_challenge=code_challenge,
-            expected_state=expected_state,
-            timeout_seconds=int(args.timeout_seconds or 180),
-            open_browser=not bool(args.no_browser),
-        )
+        callback_payload: dict[str, str] | None = None
+        if auth_flow in {"auto", "localhost"}:
+            expected_state = secrets.token_urlsafe(32)
+            try:
+                callback_payload = _collect_oauth_callback_via_localhost(
+                    supabase_url=supabase_url,
+                    provider=provider,
+                    code_challenge=code_challenge,
+                    expected_state=expected_state,
+                    timeout_seconds=int(args.timeout_seconds or 180),
+                    open_browser=not bool(args.no_browser),
+                )
+            except RuntimeError:
+                if auth_flow == "localhost":
+                    raise
+                print(
+                    "Warning: localhost callback failed; falling back to polling login flow.",
+                    file=sys.stderr,
+                )
+        if callback_payload is None:
+            callback_payload = _collect_oauth_callback_via_polling(
+                api_base_url=api_base_url,
+                provider=provider,
+                code_challenge=code_challenge,
+                timeout_seconds=int(args.timeout_seconds or 180),
+                open_browser=not bool(args.no_browser),
+            )
         auth_code = str(callback_payload.get("code") or "").strip()
         redirect_uri = str(callback_payload.get("redirect_uri") or "").strip()
         if not auth_code:
