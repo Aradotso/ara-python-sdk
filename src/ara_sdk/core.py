@@ -43,6 +43,7 @@ CLI_SSH_ALIAS = "ara-personal"
 CLI_SSH_KEY_BASENAME = "ara_personal_ed25519"
 CLI_SSH_PROXY_TOKEN_FILENAME = "ara_personal_proxy_token"
 CLI_WORKSPACE_PATH = "/root/.ara/workspace"
+CONNECT_EXCHANGE_RETRY_DELAYS_SECONDS = (0.0, 4.0, 10.0, 20.0)
 _JWT_REFRESH_SKEW_SECONDS = 30
 _CLI_OAUTH_CALLBACK_HOST = "127.0.0.1"
 _CLI_OAUTH_CALLBACK_PORT = 53682
@@ -2146,6 +2147,9 @@ class _Http:
                 f"{method} {path} failed ({exc.code}). "
                 f"Response body hidden by default; set {DEBUG_HTTP_ERRORS_ENV}=true to include it."
             ) from exc
+        except (TimeoutError, urllib.error.URLError) as exc:
+            message = str(exc.reason) if isinstance(exc, urllib.error.URLError) else str(exc)
+            raise RuntimeError(f"{method} {path} failed (network): {message}") from exc
 
     def list_apps(self) -> dict[str, Any]:
         return self._request("/apps")
@@ -3249,6 +3253,20 @@ def _upsert_ssh_config(alias: str, config_block: str) -> pathlib.Path:
     return config_path
 
 
+def _is_transient_connect_exchange_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    transient_markers = (
+        "post /session/connect/exchange failed (503)",
+        "post /session/connect/exchange failed (network)",
+        "timed out",
+        "connection reset",
+        "temporarily unavailable",
+        "ssh_bootstrap_failed",
+        "sandbox_unavailable",
+    )
+    return any(marker in message for marker in transient_markers)
+
+
 def run_connect_cli(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(description="Ara local SSH connect helper")
     parser.add_argument("uri", help='connect URI, e.g. ara://connect?token=...')
@@ -3271,14 +3289,30 @@ def run_connect_cli(argv: Optional[list[str]] = None) -> None:
         raise SystemExit(f"ara connect: failed reading generated public key ({exc})") from None
 
     http = _Http(api_base_url, bearer)
-    try:
-        exchange = http.connect_exchange(
-            token=token,
-            public_key=public_key_text,
-            key_comment=str(args.key_comment or "local"),
-        )
-    except RuntimeError as exc:
-        raise SystemExit(f"ara connect: {exc}") from None
+    exchange: Optional[dict[str, Any]] = None
+    last_error: Optional[Exception] = None
+    for attempt_index, delay_seconds in enumerate(CONNECT_EXCHANGE_RETRY_DELAYS_SECONDS):
+        if delay_seconds > 0:
+            time.sleep(delay_seconds)
+        try:
+            exchange = http.connect_exchange(
+                token=token,
+                public_key=public_key_text,
+                key_comment=str(args.key_comment or "local"),
+            )
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            should_retry = _is_transient_connect_exchange_error(exc) and (
+                attempt_index < len(CONNECT_EXCHANGE_RETRY_DELAYS_SECONDS) - 1
+            )
+            if should_retry:
+                continue
+            raise SystemExit(f"ara connect: {exc}") from None
+    if exchange is None:
+        if last_error is not None:
+            raise SystemExit(f"ara connect: {last_error}") from None
+        raise SystemExit("ara connect: exchange failed unexpectedly")
 
     host_alias = str(exchange.get("host_alias") or CLI_SSH_ALIAS).strip() or CLI_SSH_ALIAS
     proxy_token = str(exchange.get("proxy_token") or "").strip()
