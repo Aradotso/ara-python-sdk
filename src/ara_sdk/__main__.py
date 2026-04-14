@@ -5,7 +5,7 @@ import pathlib
 import sys
 from types import ModuleType
 
-from .core import App, _run_app_cli, run_auth_cli, run_runtime_cli
+from .core import App, _run_app_cli, run_auth_cli, run_connect_cli, run_runtime_cli, run_ssh_proxy_cli
 
 
 def _print_help(bin_name: str) -> None:
@@ -22,6 +22,7 @@ def _print_help(bin_name: str) -> None:
                 "  auth      login/whoami/logout/rotate for CLI auth",
                 "  runtime   runtime capabilities, tools, skills, and control APIs",
                 "  session   start/status/stop authenticated cloud sessions",
+                "  connect   one-line local SSH setup for your personal session",
                 "",
                 "Global aliases (no app script required):",
                 "  start, status, stop   shorthand for `ara runtime session <command>`",
@@ -32,6 +33,7 @@ def _print_help(bin_name: str) -> None:
                 f"  {bin_name} auth login",
                 f"  {bin_name} start",
                 f"  {bin_name} runtime capabilities --session sess-123",
+                f"  {bin_name} connect \"ara://connect?token=...\"",
                 "",
                 "More help:",
                 f"  {bin_name} <command> <app_script.py> --help",
@@ -95,6 +97,14 @@ def main() -> None:
             run_auth_cli(argv=["--help"])
             return
         run_auth_cli(argv=sys.argv[2:])
+        return
+    if len(sys.argv) >= 2 and sys.argv[1] == "connect":
+        if len(sys.argv) == 2:
+            raise SystemExit(f"Usage: {bin_name} connect \"ara://connect?token=...\"")
+        run_connect_cli(argv=sys.argv[2:])
+        return
+    if len(sys.argv) >= 2 and sys.argv[1] == "ssh-proxy":
+        run_ssh_proxy_cli(argv=sys.argv[2:])
         return
     if len(sys.argv) < 3:
         raise SystemExit(f"Usage: {bin_name} <command> <app_script.py> [args...]")

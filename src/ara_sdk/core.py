@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import ast
 import base64
 import hashlib
@@ -14,6 +15,9 @@ import os
 import pathlib
 import re
 import secrets
+import shlex
+import socket
+import subprocess
 import sys
 import threading
 import textwrap
@@ -34,6 +38,11 @@ DEBUG_HTTP_ERRORS_ENV = "ARA_SDK_DEBUG_HTTP_ERRORS"
 DEFAULT_API_BASE_URL = "https://api.ara.so"
 CLI_CREDENTIALS_FILENAME = "credentials.json"
 CLI_CREDENTIALS_DIRNAME = ".ara"
+CLI_SSH_DIRNAME = "ssh"
+CLI_SSH_ALIAS = "ara-personal"
+CLI_SSH_KEY_BASENAME = "ara_personal_ed25519"
+CLI_SSH_PROXY_TOKEN_FILENAME = "ara_personal_proxy_token"
+CLI_WORKSPACE_PATH = "/root/.ara/workspace"
 _JWT_REFRESH_SKEW_SECONDS = 30
 _CLI_OAUTH_CALLBACK_HOST = "127.0.0.1"
 _CLI_OAUTH_CALLBACK_PORT = 53682
@@ -2434,6 +2443,20 @@ class _Http:
     def rotate_api_key(self) -> dict[str, Any]:
         return self._request("/apps/api-key/rotate", method="POST")
 
+    def connect_token(self) -> dict[str, Any]:
+        return self._request("/session/connect/token", method="POST", body={})
+
+    def connect_exchange(self, *, token: str, public_key: str, key_comment: str) -> dict[str, Any]:
+        return self._request(
+            "/session/connect/exchange",
+            method="POST",
+            body={
+                "token": token,
+                "public_key": public_key,
+                "key_comment": key_comment,
+            },
+        )
+
 
 class AraClient:
     """Runtime client bound to one App manifest."""
@@ -3074,6 +3097,301 @@ def _parse_json_object_arg(raw: str, *, flag_name: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise RuntimeError(f"{flag_name} must decode to a JSON object")
     return parsed
+
+
+def _cli_ssh_dir_path() -> pathlib.Path:
+    return pathlib.Path.home() / CLI_CREDENTIALS_DIRNAME / CLI_SSH_DIRNAME
+
+
+def _cli_ssh_private_key_path() -> pathlib.Path:
+    return _cli_ssh_dir_path() / CLI_SSH_KEY_BASENAME
+
+
+def _cli_ssh_public_key_path() -> pathlib.Path:
+    return pathlib.Path(str(_cli_ssh_private_key_path()) + ".pub")
+
+
+def _cli_ssh_proxy_token_path() -> pathlib.Path:
+    return _cli_ssh_dir_path() / CLI_SSH_PROXY_TOKEN_FILENAME
+
+
+def _ensure_local_ssh_keypair() -> tuple[pathlib.Path, pathlib.Path]:
+    key_dir = _cli_ssh_dir_path()
+    key_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(key_dir, 0o700)
+    except OSError:
+        logger.debug("Failed to chmod ssh dir: %s", key_dir, exc_info=True)
+    private_key = _cli_ssh_private_key_path()
+    public_key = _cli_ssh_public_key_path()
+    if not private_key.exists():
+        subprocess.run(
+            [
+                "ssh-keygen",
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-f",
+                str(private_key),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    if not public_key.exists():
+        with public_key.open("w", encoding="utf-8") as fp:
+            subprocess.run(
+                ["ssh-keygen", "-y", "-f", str(private_key)],
+                check=True,
+                stdout=fp,
+                stderr=subprocess.DEVNULL,
+            )
+        public_key.write_text(public_key.read_text(encoding="utf-8").strip() + "\n", encoding="utf-8")
+    try:
+        os.chmod(private_key, 0o600)
+    except OSError:
+        logger.debug("Failed to chmod private key: %s", private_key, exc_info=True)
+    try:
+        os.chmod(public_key, 0o644)
+    except OSError:
+        logger.debug("Failed to chmod public key: %s", public_key, exc_info=True)
+    return private_key, public_key
+
+
+def _write_proxy_token_file(token: str) -> pathlib.Path:
+    path = _cli_ssh_proxy_token_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(token or "").strip() + "\n", encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        logger.debug("Failed to chmod proxy token file: %s", path, exc_info=True)
+    return path
+
+
+def _ssh_config_quote_path(path_value: pathlib.Path) -> str:
+    raw = str(path_value)
+    escaped = raw.replace("\\", "\\\\").replace('"', '\\"')
+    return f"\"{escaped}\""
+
+
+def _extract_connect_token(raw: str) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        raise RuntimeError("connect URI is required")
+    if value.startswith("ara://"):
+        parsed = urllib.parse.urlparse(value)
+        if parsed.scheme != "ara":
+            raise RuntimeError("connect URI must use ara:// scheme")
+        params = urllib.parse.parse_qs(parsed.query or "")
+        token = str((params.get("token") or [""])[0]).strip()
+        if not token:
+            raise RuntimeError("connect URI missing token query parameter")
+        return token
+    return value
+
+
+def _api_base_to_ws_base(api_base_url: str) -> str:
+    parsed = urllib.parse.urlparse(str(api_base_url or "").strip())
+    if parsed.scheme == "https":
+        scheme = "wss"
+    elif parsed.scheme == "http":
+        scheme = "ws"
+    else:
+        scheme = "wss"
+    netloc = parsed.netloc
+    if not netloc:
+        raise RuntimeError(f"Invalid ARA_API_BASE_URL: {api_base_url}")
+    return f"{scheme}://{netloc}"
+
+
+def _upsert_ssh_config(alias: str, config_block: str) -> pathlib.Path:
+    ssh_dir = pathlib.Path.home() / ".ssh"
+    ssh_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(ssh_dir, 0o700)
+    except OSError:
+        logger.debug("Failed to chmod ~/.ssh", exc_info=True)
+    config_path = ssh_dir / "config"
+    existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    lines = existing.splitlines()
+    start = None
+    end = None
+    host_re = re.compile(r"^\s*Host\s+(.+?)\s*$")
+    for idx, line in enumerate(lines):
+        match = host_re.match(line)
+        if not match:
+            continue
+        host_name = match.group(1).strip()
+        if start is None and host_name == alias:
+            start = idx
+            continue
+        if start is not None and end is None:
+            end = idx
+            break
+    new_lines: list[str] = []
+    if start is None:
+        new_lines = lines + ([""] if lines else []) + config_block.splitlines()
+    else:
+        if end is None:
+            end = len(lines)
+        new_lines = lines[:start] + config_block.splitlines() + lines[end:]
+    payload = "\n".join(new_lines).rstrip() + "\n"
+    config_path.write_text(payload, encoding="utf-8")
+    try:
+        os.chmod(config_path, 0o600)
+    except OSError:
+        logger.debug("Failed to chmod ~/.ssh/config", exc_info=True)
+    return config_path
+
+
+def run_connect_cli(argv: Optional[list[str]] = None) -> None:
+    parser = argparse.ArgumentParser(description="Ara local SSH connect helper")
+    parser.add_argument("uri", help='connect URI, e.g. ara://connect?token=...')
+    parser.add_argument("--key-comment", default=socket.gethostname() or "local")
+    args = parser.parse_args(argv)
+
+    token = _extract_connect_token(args.uri)
+    api_base_url = _resolve_api_base_url(DEFAULT_API_BASE_URL)
+    bearer = _resolve_control_plane_bearer()
+    if not bearer:
+        raise SystemExit("ara connect: not logged in. Run `ara auth login` first.")
+
+    try:
+        private_key, public_key = _ensure_local_ssh_keypair()
+    except Exception as exc:  # noqa: BLE001
+        raise SystemExit(f"ara connect: failed generating local SSH keypair ({exc})") from None
+    try:
+        public_key_text = public_key.read_text(encoding="utf-8").strip()
+    except Exception as exc:  # noqa: BLE001
+        raise SystemExit(f"ara connect: failed reading generated public key ({exc})") from None
+
+    http = _Http(api_base_url, bearer)
+    try:
+        exchange = http.connect_exchange(
+            token=token,
+            public_key=public_key_text,
+            key_comment=str(args.key_comment or "local"),
+        )
+    except RuntimeError as exc:
+        raise SystemExit(f"ara connect: {exc}") from None
+
+    host_alias = str(exchange.get("host_alias") or CLI_SSH_ALIAS).strip() or CLI_SSH_ALIAS
+    proxy_token = str(exchange.get("proxy_token") or "").strip()
+    if not proxy_token:
+        raise SystemExit("ara connect: exchange failed (missing proxy token)")
+    proxy_token_file = _write_proxy_token_file(proxy_token)
+    ssh_config_block = "\n".join(
+        [
+            f"Host {host_alias}",
+            "  HostName 127.0.0.1",
+            "  Port 22",
+            "  User root",
+            f"  IdentityFile {_ssh_config_quote_path(private_key)}",
+            "  IdentitiesOnly yes",
+            "  StrictHostKeyChecking no",
+            "  UserKnownHostsFile /dev/null",
+            f"  ProxyCommand ara ssh-proxy --token-file {shlex.quote(str(proxy_token_file))}",
+        ]
+    )
+    config_path = _upsert_ssh_config(host_alias, ssh_config_block)
+
+    commands = exchange.get("commands") if isinstance(exchange.get("commands"), dict) else {}
+    ssh_command = str(commands.get("ssh") or f"ssh {host_alias}").strip()
+    vscode_command = str(commands.get("vscode") or f"code --remote ssh-remote+{host_alias} {CLI_WORKSPACE_PATH}").strip()
+    sshfs_command = str(commands.get("sshfs_mount") or f"mkdir -p ~/AraWorkspace && sshfs {host_alias}:{CLI_WORKSPACE_PATH} ~/AraWorkspace").strip()
+
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "host_alias": host_alias,
+                "ssh_config_path": str(config_path),
+                "private_key_path": str(private_key),
+                "proxy_token_file": str(proxy_token_file),
+                "session_id": str(exchange.get("session_id") or ""),
+                "commands": {
+                    "ssh": ssh_command,
+                    "vscode": vscode_command,
+                    "sshfs_mount": sshfs_command,
+                },
+                "next": {
+                    "terminal": ssh_command,
+                    "vscode": vscode_command,
+                },
+            },
+            indent=2,
+        )
+    )
+
+
+async def _run_ssh_proxy(token: str) -> None:
+    try:
+        import websockets
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("ssh proxy requires the `websockets` package") from exc
+
+    api_base = _resolve_api_base_url(DEFAULT_API_BASE_URL)
+    ws_base = _api_base_to_ws_base(api_base)
+    ws_url = f"{ws_base}/session/ssh/proxy"
+
+    async with websockets.connect(  # type: ignore[attr-defined]
+        ws_url,
+        additional_headers={"Authorization": f"Bearer {token}"},
+        ping_interval=30,
+        ping_timeout=120,
+        max_size=None,
+    ) as ws:
+        loop = asyncio.get_running_loop()
+
+        async def _stdin_to_ws() -> None:
+            fd = sys.stdin.fileno()
+            while True:
+                chunk = await loop.run_in_executor(None, os.read, fd, 65536)
+                if not chunk:
+                    await ws.close()
+                    break
+                await ws.send(chunk)
+
+        async def _ws_to_stdout() -> None:
+            fd = sys.stdout.fileno()
+            async for message in ws:
+                if isinstance(message, bytes):
+                    os.write(fd, message)
+                else:
+                    os.write(fd, str(message).encode("utf-8"))
+
+        t_in = asyncio.create_task(_stdin_to_ws())
+        t_out = asyncio.create_task(_ws_to_stdout())
+        done, pending = await asyncio.wait([t_in, t_out], return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        for task in done:
+            task.result()
+
+
+def run_ssh_proxy_cli(argv: Optional[list[str]] = None) -> None:
+    parser = argparse.ArgumentParser(description="Ara SSH ProxyCommand bridge")
+    parser.add_argument("--token", default="")
+    parser.add_argument("--token-file", default="")
+    args = parser.parse_args(argv)
+    token = str(args.token or "").strip()
+    token_file = str(args.token_file or "").strip()
+    if not token and token_file:
+        path = pathlib.Path(token_file).expanduser()
+        if not path.exists():
+            raise SystemExit(f"ara ssh-proxy: token file not found: {path}")
+        token = path.read_text(encoding="utf-8").strip()
+    if not token:
+        raise SystemExit("ara ssh-proxy: --token or --token-file is required")
+    try:
+        asyncio.run(_run_ssh_proxy(token))
+    except RuntimeError as exc:
+        raise SystemExit(f"ara ssh-proxy: {exc}") from None
 
 
 def _format_runtime_log_line(row: dict[str, Any]) -> str:
