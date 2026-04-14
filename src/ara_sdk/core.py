@@ -2117,6 +2117,7 @@ class _Http:
         body: Optional[dict[str, Any]] = None,
         headers: Optional[dict[str, str]] = None,
         auth_header: Optional[str] = None,
+        timeout_seconds: int = 30,
     ) -> Any:
         url = f"{self.base_url}{path}"
         payload = None if body is None else json.dumps(body).encode("utf-8")
@@ -2132,7 +2133,7 @@ class _Http:
             req_headers.update(headers)
         req = urllib.request.Request(url, method=method, data=payload, headers=req_headers)
         try:
-            with urllib.request.urlopen(req, timeout=30) as response:
+            with urllib.request.urlopen(req, timeout=int(timeout_seconds or 30)) as response:
                 if response.status == 204:
                     return None
                 raw = response.read().decode("utf-8")
@@ -2450,6 +2451,7 @@ class _Http:
         return self._request(
             "/session/connect/exchange",
             method="POST",
+            timeout_seconds=180,
             body={
                 "token": token,
                 "public_key": public_key,

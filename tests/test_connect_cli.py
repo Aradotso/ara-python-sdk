@@ -67,3 +67,22 @@ def test_run_connect_cli_exchanges_token_and_outputs_commands(monkeypatch, tmp_p
     assert "ProxyCommand ara ssh-proxy --token-file " in captured["block"]
     assert "--token-file '" in captured["block"]
     assert "proxy token'" in captured["block"]
+
+
+def test_connect_exchange_uses_extended_timeout(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_request(self, path: str, **kwargs):  # noqa: ANN001
+        _ = self
+        captured["path"] = path
+        captured.update(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(core._Http, "_request", _fake_request)
+
+    http = core._Http(base_url="https://api.ara.so", api_key="ara_api_key_test")
+    response = http.connect_exchange(token="abc123", public_key="ssh-ed25519 AAAATEST", key_comment="local")
+
+    assert response["ok"] is True
+    assert captured["path"] == "/session/connect/exchange"
+    assert captured["timeout_seconds"] == 180
