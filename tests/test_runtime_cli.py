@@ -74,3 +74,22 @@ def test_runtime_cli_session_lifecycle_commands(monkeypatch, tmp_path, capsys):
     sdk_core.run_runtime_cli(["session", "stop"])
     out = capsys.readouterr().out
     assert '"ok": true' in out.lower()
+
+
+def test_runtime_client_session_start_uses_extended_timeout():
+    captured: dict[str, object] = {}
+
+    class _DummyHttp:
+        def _request(self, path: str, **kwargs):  # noqa: ANN001
+            captured["path"] = path
+            captured.update(kwargs)
+            return {"ok": True}
+
+    client = sdk_core.AraRuntimeClient.__new__(sdk_core.AraRuntimeClient)
+    client.http = _DummyHttp()
+
+    response = sdk_core.AraRuntimeClient.session_start(client)
+
+    assert response["ok"] is True
+    assert captured["path"] == "/session/start"
+    assert captured["timeout_seconds"] == 120

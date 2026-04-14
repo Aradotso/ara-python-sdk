@@ -2901,7 +2901,7 @@ class AraRuntimeClient:
         return f"{path}?{encoded}"
 
     def session_start(self) -> dict[str, Any]:
-        return self.http._request("/session/start", method="POST", body={})
+        return self.http._request("/session/start", method="POST", body={}, timeout_seconds=120)
 
     def session_status(self) -> dict[str, Any]:
         return self.http._request("/session/status", method="GET")
