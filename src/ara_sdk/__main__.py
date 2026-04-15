@@ -21,7 +21,8 @@ def _print_help(bin_name: str) -> None:
                 "Global command groups (no app script required):",
                 "  auth      login/whoami/logout/rotate for CLI auth",
                 "  runtime   runtime capabilities, tools, skills, and control APIs",
-                "  session   start/status/stop authenticated cloud sessions",
+                "  session   start/status/stop/exec/keepalive authenticated cloud sessions",
+                "  automation list/add/update/remove/purge/enable/disable/runs/replay user automations",
                 "  connect   one-line local SSH setup for your personal session",
                 "",
                 "Global aliases (no app script required):",
@@ -32,6 +33,11 @@ def _print_help(bin_name: str) -> None:
                 f"  {bin_name} run app.py --agent booking_coordinator --message \"hello\"",
                 f"  {bin_name} auth login",
                 f"  {bin_name} start",
+                f"  {bin_name} session exec --command \"pwd\"",
+                f"  {bin_name} session keepalive --interval-seconds 30",
+                f"  {bin_name} automation list",
+                f"  {bin_name} automation add --name \"daily-check\" --cron \"0 9 * * *\" --message \"Daily summary\"",
+                f"  {bin_name} automation purge --all --yes",
                 f"  {bin_name} runtime capabilities --session sess-123",
                 f"  {bin_name} connect \"ara://connect?token=...\"",
                 "",
@@ -40,6 +46,7 @@ def _print_help(bin_name: str) -> None:
                 f"  {bin_name} auth --help",
                 f"  {bin_name} runtime --help",
                 f"  {bin_name} session --help",
+                f"  {bin_name} automation --help",
             ]
         )
     )
@@ -91,6 +98,12 @@ def main() -> None:
             run_runtime_cli(argv=["--help"])
             return
         run_runtime_cli(argv=sys.argv[2:])
+        return
+    if len(sys.argv) >= 2 and sys.argv[1] == "automation":
+        if len(sys.argv) == 2:
+            run_runtime_cli(argv=["automation", "--help"])
+            return
+        run_runtime_cli(argv=["automation", *sys.argv[2:]])
         return
     if len(sys.argv) >= 2 and sys.argv[1] == "auth":
         if len(sys.argv) == 2:

@@ -13,8 +13,19 @@ def _future_iso(minutes: int = 15) -> str:
     return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
 
 
-def test_auth_login_defaults_to_oauth_pkce(monkeypatch, tmp_path):
+def test_auth_login_defaults_to_polling_pkce(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
+    status_responses = iter(
+        [
+            {
+                "ok": True,
+                "status": "approved",
+                "auth_code": "oauth_code_default_poll",
+                "state": "state_default_poll",
+                "redirect_uri": "https://api.ara.so/auth/cli/device/callback?sid=sess_default",
+            },
+        ]
+    )
 
     def _fake_cli_auth_config(self):
         _ = self
@@ -25,22 +36,31 @@ def test_auth_login_defaults_to_oauth_pkce(monkeypatch, tmp_path):
             "api_base_url": "https://api.ara.so",
         }
 
-    def _fake_callback(**kwargs):
+    def _fake_device_start(self, **kwargs):
+        _ = self
         assert kwargs["provider"] == "google"
-        assert kwargs["open_browser"] is False
-        assert kwargs["supabase_url"] == "https://try.ara.so"
-        assert kwargs["expected_state"]
+        assert kwargs["code_challenge"]
+        assert kwargs["timeout_seconds"] == 180
         return {
-            "code": "oauth_code_1",
-            "state": kwargs["expected_state"],
-            "redirect_uri": "http://127.0.0.1:53682/auth/callback",
+            "ok": True,
+            "session_id": "sess_default",
+            "poll_token": "poll_tok_default",
+            "authorize_url": "https://try.ara.so/auth/v1/authorize?x=default",
+            "interval_seconds": 1,
+            "expires_at": _future_iso(5),
         }
+
+    def _fake_device_status(self, **kwargs):
+        _ = self
+        assert kwargs["session_id"] == "sess_default"
+        assert kwargs["poll_token"] == "poll_tok_default"
+        return next(status_responses)
 
     def _fake_supabase_token_request(**kwargs):
         assert kwargs["grant_type"] == "pkce"
-        assert kwargs["body"]["auth_code"] == "oauth_code_1"
+        assert kwargs["body"]["auth_code"] == "oauth_code_default_poll"
         assert kwargs["body"]["code_verifier"]
-        assert kwargs["body"]["redirect_uri"] == "http://127.0.0.1:53682/auth/callback"
+        assert kwargs["body"]["redirect_uri"] == "https://api.ara.so/auth/cli/device/callback?sid=sess_default"
         return {
             "access_token": "jwt_access_pkce",
             "refresh_token": "refresh_pkce",
@@ -53,7 +73,8 @@ def test_auth_login_defaults_to_oauth_pkce(monkeypatch, tmp_path):
         return {"ok": True, "user": {"id": "u_test", "email": "oauth@test.local"}}
 
     monkeypatch.setattr(core._Http, "cli_auth_config", _fake_cli_auth_config)
-    monkeypatch.setattr(core, "_collect_oauth_callback_via_localhost", _fake_callback)
+    monkeypatch.setattr(core._Http, "cli_auth_device_start", _fake_device_start)
+    monkeypatch.setattr(core._Http, "cli_auth_device_status", _fake_device_status)
     monkeypatch.setattr(core, "_supabase_token_request", _fake_supabase_token_request)
     monkeypatch.setattr(core._Http, "cli_whoami", _fake_whoami)
 
@@ -146,74 +167,10 @@ def test_auth_login_poll_flow_uses_device_endpoints(monkeypatch, tmp_path):
     assert payload["refresh_token"] == "refresh_poll"
 
 
-def test_auth_login_auto_falls_back_to_poll(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    status_responses = iter(
-        [
-            {
-                "ok": True,
-                "status": "approved",
-                "auth_code": "oauth_code_poll_2",
-                "state": "state_poll_2",
-                "redirect_uri": "https://api.ara.so/auth/cli/device/callback?sid=sess_2",
-            }
-        ]
-    )
-
-    def _fake_cli_auth_config(self):
-        _ = self
-        return {
-            "ok": True,
-            "supabase_url": "https://try.ara.so",
-            "supabase_anon_key": "anon_test",
-            "api_base_url": "https://api.ara.so",
-        }
-
-    def _fake_localhost_callback(**kwargs):
-        _ = kwargs
-        raise RuntimeError("No localhost OAuth callback received before timeout.")
-
-    def _fake_device_start(self, **kwargs):
-        _ = (self, kwargs)
-        return {
-            "ok": True,
-            "session_id": "sess_2",
-            "poll_token": "poll_tok_2",
-            "authorize_url": "https://try.ara.so/auth/v1/authorize?x=2",
-            "interval_seconds": 1,
-            "expires_at": _future_iso(5),
-        }
-
-    def _fake_device_status(self, **kwargs):
-        _ = (self, kwargs)
-        return next(status_responses)
-
-    def _fake_supabase_token_request(**kwargs):
-        assert kwargs["body"]["auth_code"] == "oauth_code_poll_2"
-        return {
-            "access_token": "jwt_access_poll_2",
-            "refresh_token": "refresh_poll_2",
-            "expires_in": 3600,
-            "user": {"id": "u_test", "email": "oauth@test.local"},
-        }
-
-    def _fake_whoami(self):
-        _ = self
-        return {"ok": True, "user": {"id": "u_test", "email": "oauth@test.local"}}
-
-    monkeypatch.setattr(core._Http, "cli_auth_config", _fake_cli_auth_config)
-    monkeypatch.setattr(core, "_collect_oauth_callback_via_localhost", _fake_localhost_callback)
-    monkeypatch.setattr(core._Http, "cli_auth_device_start", _fake_device_start)
-    monkeypatch.setattr(core._Http, "cli_auth_device_status", _fake_device_status)
-    monkeypatch.setattr(core, "_supabase_token_request", _fake_supabase_token_request)
-    monkeypatch.setattr(core._Http, "cli_whoami", _fake_whoami)
-
-    core.run_auth_cli(["login", "--auth-flow", "auto", "--no-browser"])
-    err = capsys.readouterr().err
-    assert "falling back to polling login flow" in err
-
-    payload = json.loads((tmp_path / ".ara" / "credentials.json").read_text(encoding="utf-8"))
-    assert payload["access_token"] == "jwt_access_poll_2"
+@pytest.mark.parametrize("legacy_auth_flow", ["auto", "localhost"])
+def test_auth_login_rejects_legacy_auth_flows(legacy_auth_flow):
+    with pytest.raises(SystemExit):
+        core.run_auth_cli(["login", "--auth-flow", legacy_auth_flow])
 
 
 def test_auth_login_poll_flow_fails_fast_when_code_already_consumed(monkeypatch, tmp_path):

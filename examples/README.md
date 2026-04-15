@@ -27,5 +27,6 @@ ara run <example.py> --agent <agent_id> --runtime-key "<runtime_key>" --message 
 11. `07c-runtime-automation-manager.py` - create/list/delete automation lifecycle.
 12. `08-11labs-voice-reminders.py` - 11labs outbound call + recurring cron reminder flow.
 13. `09-runtime-model-selector.py` - minimal `runtime(model=...)` selector example.
+14. `10-single-file-automation.py` - self-contained, declarative single automation script with apply/delete commands.
 
 For full docs and walkthroughs: <https://docs.ara.so/examples/overview>

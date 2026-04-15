@@ -54,7 +54,8 @@ def test_standalone_cli_help_lists_top_level_commands(monkeypatch, capsys):
     assert "App commands (require <app_script.py>):" in out
     assert "auth      login/whoami/logout/rotate for CLI auth" in out
     assert "runtime   runtime capabilities, tools, skills, and control APIs" in out
-    assert "session   start/status/stop authenticated cloud sessions" in out
+    assert "session   start/status/stop/exec/keepalive authenticated cloud sessions" in out
+    assert "automation list/add/update/remove/purge/enable/disable/runs/replay user automations" in out
 
 
 def test_standalone_cli_invalid_project_name_shows_dns_hint(tmp_path, monkeypatch):
@@ -150,6 +151,24 @@ def test_session_group_dispatches_without_app_script(monkeypatch):
     sdk_main.main()
 
     assert captured["argv"] == ["session", "status"]
+
+
+def test_automation_group_dispatches_without_app_script(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _run_runtime_cli(argv=None):
+        captured["argv"] = list(argv or [])
+
+    monkeypatch.setattr(sdk_main, "run_runtime_cli", _run_runtime_cli)
+    monkeypatch.setattr(
+        sdk_main.sys,
+        "argv",
+        ["ara", "automation", "list"],
+    )
+
+    sdk_main.main()
+
+    assert captured["argv"] == ["automation", "list"]
 
 
 def test_session_alias_dispatches_to_runtime_session(monkeypatch):

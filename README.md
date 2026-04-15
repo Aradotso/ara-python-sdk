@@ -82,6 +82,20 @@ pip install ara-sdk
 - SDK reference: <https://docs.ara.so/sdk/reference>
 - Examples index: <https://docs.ara.so/examples/overview>
 
+## Runtime Automation CLI
+
+The CLI supports first-class user automation management:
+
+```bash
+ara automation list
+ara automation add --name "daily-check" --cron "0 9 * * *" --message "Daily summary"
+ara automation disable --id <job_id>
+ara automation remove --id <job_id> --yes
+ara automation purge --all --yes
+ara automation runs --state failed
+ara automation replay --run-id <run_id>
+```
+
 ## Local testing (no uv)
 
 ```bash

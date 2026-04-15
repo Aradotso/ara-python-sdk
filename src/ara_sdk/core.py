@@ -2914,6 +2914,222 @@ class AraRuntimeClient:
             return result
         return {"ok": True, "result": result}
 
+    def session_exec(self, *, command: str, timeout_seconds: int = 90) -> dict[str, Any]:
+        command_text = str(command or "").strip()
+        if not command_text:
+            raise RuntimeError("session exec requires a non-empty command")
+        timeout_value = max(5, min(int(timeout_seconds or 90), 600))
+        request_timeout = max(30, timeout_value + 30)
+        return self.http._request(
+            "/session/terminal/exec",
+            method="POST",
+            body={
+                "command": command_text,
+                "timeout_seconds": timeout_value,
+            },
+            timeout_seconds=request_timeout,
+        )
+
+    def session_heartbeat(self) -> dict[str, Any]:
+        result = self.http._request("/session/heartbeat", method="POST", body={})
+        if result is None:
+            return {"ok": False, "reason": "empty_response"}
+        if isinstance(result, dict):
+            return result
+        return {"ok": bool(result), "result": result}
+
+    def automation_list_jobs(self) -> dict[str, Any]:
+        return self.http._request("/automations/jobs", method="GET")
+
+    def automation_create_job(
+        self,
+        *,
+        name: str,
+        schedule_kind: str,
+        timezone: str = "UTC",
+        every_seconds: Optional[int] = None,
+        schedule_expr: str = "",
+        payload: Optional[dict[str, Any]] = None,
+        execution_mode: str = "sandbox_required",
+        misfire_policy: str = "fire_latest_only",
+        max_retries: int = 3,
+        retry_backoff_seconds: int = 30,
+    ) -> dict[str, Any]:
+        job_name = str(name or "").strip()
+        if not job_name:
+            raise RuntimeError("automation add requires --name")
+        kind = str(schedule_kind or "").strip().lower()
+        if kind not in {"every", "cron"}:
+            raise RuntimeError("automation add requires schedule kind 'every' or 'cron'")
+        if kind == "every":
+            if every_seconds is None:
+                raise RuntimeError("automation add with every schedule requires --every-seconds")
+            try:
+                every_seconds = int(every_seconds)
+            except (TypeError, ValueError):
+                raise RuntimeError("--every-seconds must be an integer") from None
+        else:
+            if not str(schedule_expr or "").strip():
+                raise RuntimeError("automation add with cron schedule requires --cron")
+        return self.http._request(
+            "/automations/jobs",
+            method="POST",
+            body={
+                "name": job_name,
+                "schedule_kind": kind,
+                "every_seconds": every_seconds if kind == "every" else None,
+                "schedule_expr": str(schedule_expr or "").strip() if kind == "cron" else None,
+                "timezone": str(timezone or "UTC").strip() or "UTC",
+                "payload": dict(payload or {}),
+                "execution_mode": str(execution_mode or "sandbox_required"),
+                "misfire_policy": str(misfire_policy or "fire_latest_only"),
+                "max_retries": int(max_retries),
+                "retry_backoff_seconds": int(retry_backoff_seconds),
+            },
+        )
+
+    def automation_update_job(
+        self,
+        *,
+        job_id: str,
+        name: Optional[str] = None,
+        enabled: Optional[bool] = None,
+        payload: Optional[dict[str, Any]] = None,
+        max_retries: Optional[int] = None,
+        retry_backoff_seconds: Optional[int] = None,
+    ) -> dict[str, Any]:
+        resolved_job_id = str(job_id or "").strip()
+        if not resolved_job_id:
+            raise RuntimeError("automation update requires --id")
+        body: dict[str, Any] = {}
+        if name is not None:
+            body["name"] = str(name).strip()
+        if enabled is not None:
+            body["enabled"] = bool(enabled)
+        if payload is not None:
+            body["payload"] = dict(payload)
+        if max_retries is not None:
+            body["max_retries"] = int(max_retries)
+        if retry_backoff_seconds is not None:
+            body["retry_backoff_seconds"] = int(retry_backoff_seconds)
+        if not body:
+            raise RuntimeError(
+                "automation update requires at least one field (--name/--enable/--disable/--payload-json/--max-retries/--retry-backoff-seconds)"
+            )
+        return self.http._request(
+            f"/automations/jobs/{urllib.parse.quote(resolved_job_id, safe='')}",
+            method="PATCH",
+            body=body,
+        )
+
+    def automation_delete_job(self, *, job_id: str) -> dict[str, Any]:
+        resolved_job_id = str(job_id or "").strip()
+        if not resolved_job_id:
+            raise RuntimeError("automation remove requires --id")
+        return self.http._request(
+            f"/automations/jobs/{urllib.parse.quote(resolved_job_id, safe='')}",
+            method="DELETE",
+        )
+
+    def automation_list_runs(self, *, state: str = "") -> dict[str, Any]:
+        path = self._with_query("/automations/runs", {"state": str(state or "").strip()})
+        return self.http._request(path, method="GET")
+
+    def automation_replay_run(self, *, run_id: str) -> dict[str, Any]:
+        resolved_run_id = str(run_id or "").strip()
+        if not resolved_run_id:
+            raise RuntimeError("automation replay requires --run-id")
+        return self.http._request(
+            f"/automations/runs/{urllib.parse.quote(resolved_run_id, safe='')}/replay",
+            method="POST",
+            body={},
+        )
+
+    def automation_delete_job_safe(
+        self,
+        *,
+        job_id: str,
+        disable_on_failure: bool = True,
+    ) -> dict[str, Any]:
+        resolved_job_id = str(job_id or "").strip()
+        if not resolved_job_id:
+            raise RuntimeError("automation remove requires --id")
+        try:
+            delete_result = self.automation_delete_job(job_id=resolved_job_id)
+            return {
+                "ok": True,
+                "action": "deleted",
+                "job_id": resolved_job_id,
+                "result": delete_result,
+            }
+        except RuntimeError as delete_exc:
+            if not disable_on_failure:
+                return {
+                    "ok": False,
+                    "action": "delete_failed",
+                    "job_id": resolved_job_id,
+                    "error": str(delete_exc),
+                }
+            try:
+                disable_result = self.automation_update_job(
+                    job_id=resolved_job_id,
+                    enabled=False,
+                )
+            except RuntimeError as disable_exc:
+                return {
+                    "ok": False,
+                    "action": "delete_failed_disable_failed",
+                    "job_id": resolved_job_id,
+                    "error": str(delete_exc),
+                    "disable_error": str(disable_exc),
+                }
+            return {
+                "ok": True,
+                "action": "disabled_after_delete_failure",
+                "job_id": resolved_job_id,
+                "delete_error": str(delete_exc),
+                "result": disable_result,
+            }
+
+    def automation_purge_jobs(
+        self,
+        *,
+        disable_on_failure: bool = True,
+    ) -> dict[str, Any]:
+        rows = self.automation_list_jobs().get("jobs") or []
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            job_id = str(row.get("id") or "").strip()
+            if not job_id:
+                continue
+            result = self.automation_delete_job_safe(
+                job_id=job_id,
+                disable_on_failure=disable_on_failure,
+            )
+            result.setdefault("name", str(row.get("name") or ""))
+            results.append(result)
+        summary = {
+            "ok": all(bool(item.get("ok")) for item in results),
+            "initial_count": len(rows),
+            "deleted_count": sum(1 for item in results if item.get("action") == "deleted"),
+            "disabled_count": sum(1 for item in results if item.get("action") == "disabled_after_delete_failure"),
+            "failed_count": sum(1 for item in results if not item.get("ok")),
+            "results": results,
+        }
+        final_rows = self.automation_list_jobs().get("jobs") or []
+        summary["remaining_count"] = len(final_rows)
+        summary["remaining_enabled_count"] = sum(
+            1 for item in final_rows if isinstance(item, dict) and bool(item.get("enabled"))
+        )
+        summary["remaining_job_ids"] = [
+            str(item.get("id") or "")
+            for item in final_rows
+            if isinstance(item, dict) and str(item.get("id") or "").strip()
+        ]
+        return summary
+
     def capabilities(self, *, session_id: str, agent_id: str = "") -> dict[str, Any]:
         path = self._with_query(
             "/session/runtime/capabilities",
@@ -3449,6 +3665,97 @@ def run_runtime_cli(argv: Optional[list[str]] = None) -> None:
     sub_session.add_parser("start")
     sub_session.add_parser("status")
     sub_session.add_parser("stop")
+    p_session_exec = sub_session.add_parser("exec")
+    p_session_exec.add_argument("--command", dest="shell_command", default="")
+    p_session_exec.add_argument("--timeout-seconds", type=int, default=90)
+    p_session_keepalive = sub_session.add_parser("keepalive")
+    p_session_keepalive.add_argument("--interval-seconds", type=int, default=30)
+    p_session_keepalive.add_argument(
+        "--iterations",
+        type=int,
+        default=0,
+        help="Number of heartbeats to send (0 = run forever).",
+    )
+    p_session_keepalive.add_argument(
+        "--max-failures",
+        type=int,
+        default=3,
+        help="Stop after this many consecutive heartbeat failures.",
+    )
+
+    p_automation = sub.add_parser("automation")
+    sub_automation = p_automation.add_subparsers(dest="command", required=True)
+    sub_automation.add_parser("list")
+    p_automation_add = sub_automation.add_parser("add")
+    p_automation_add.add_argument("--name", required=True)
+    automation_schedule = p_automation_add.add_mutually_exclusive_group(required=True)
+    automation_schedule.add_argument("--every-seconds", type=int, default=None)
+    automation_schedule.add_argument("--cron", default="")
+    p_automation_add.add_argument("--timezone", default="UTC")
+    p_automation_add.add_argument("--message", default="")
+    p_automation_add.add_argument(
+        "--payload-json",
+        default="",
+        help="JSON object payload. Optional when --message is provided.",
+    )
+    p_automation_add.add_argument("--deliver", action="store_true")
+    p_automation_add.add_argument(
+        "--execution-mode",
+        choices=["sandbox_required", "centralized_ok"],
+        default="sandbox_required",
+    )
+    p_automation_add.add_argument(
+        "--misfire-policy",
+        choices=["fire_all", "fire_latest_only", "skip_if_late"],
+        default="fire_latest_only",
+    )
+    p_automation_add.add_argument("--max-retries", type=int, default=3)
+    p_automation_add.add_argument("--retry-backoff-seconds", type=int, default=30)
+
+    p_automation_update = sub_automation.add_parser("update")
+    p_automation_update.add_argument("--id", dest="job_id", required=True)
+    p_automation_update.add_argument("--name", default=None)
+    p_automation_update.add_argument("--message", default=None)
+    p_automation_update.add_argument("--payload-json", default="")
+    p_automation_update.add_argument("--deliver", action="store_true")
+    p_automation_update.add_argument("--enable", action="store_true")
+    p_automation_update.add_argument("--disable", action="store_true")
+    p_automation_update.add_argument("--max-retries", type=int, default=None)
+    p_automation_update.add_argument("--retry-backoff-seconds", type=int, default=None)
+
+    p_automation_remove = sub_automation.add_parser("remove")
+    p_automation_remove.add_argument("--id", dest="job_id", required=True)
+    p_automation_remove.add_argument("--yes", action="store_true")
+    p_automation_remove.add_argument(
+        "--no-disable-fallback",
+        action="store_true",
+        help="Do not disable the job when hard delete fails.",
+    )
+
+    p_automation_purge = sub_automation.add_parser("purge")
+    p_automation_purge.add_argument(
+        "--all",
+        action="store_true",
+        help="Required safety switch for bulk operation.",
+    )
+    p_automation_purge.add_argument("--yes", action="store_true")
+    p_automation_purge.add_argument(
+        "--no-disable-fallback",
+        action="store_true",
+        help="Do not disable jobs when hard delete fails.",
+    )
+
+    p_automation_enable = sub_automation.add_parser("enable")
+    p_automation_enable.add_argument("--id", dest="job_id", required=True)
+
+    p_automation_disable = sub_automation.add_parser("disable")
+    p_automation_disable.add_argument("--id", dest="job_id", required=True)
+
+    p_automation_runs = sub_automation.add_parser("runs")
+    p_automation_runs.add_argument("--state", default="")
+
+    p_automation_replay = sub_automation.add_parser("replay")
+    p_automation_replay.add_argument("--run-id", required=True)
 
     p_cap = sub.add_parser("capabilities")
     p_cap.add_argument("--session", required=True)
@@ -3497,6 +3804,220 @@ def run_runtime_cli(argv: Optional[list[str]] = None) -> None:
 
     if args.scope == "session" and args.command == "stop":
         print(json.dumps(client.session_stop(), indent=2))
+        return
+
+    if args.scope == "session" and args.command == "exec":
+        command = str(args.shell_command or "").strip()
+        if not command:
+            raise SystemExit("ara runtime: session exec requires --command")
+        print(
+            json.dumps(
+                client.session_exec(
+                    command=command,
+                    timeout_seconds=int(args.timeout_seconds or 90),
+                ),
+                indent=2,
+            )
+        )
+        return
+
+    if args.scope == "session" and args.command == "keepalive":
+        interval_seconds = max(1, min(int(args.interval_seconds or 30), 600))
+        iterations = max(0, int(args.iterations or 0))
+        max_failures = max(1, min(int(args.max_failures or 3), 20))
+        sent = 0
+        consecutive_failures = 0
+        try:
+            while iterations == 0 or sent < iterations:
+                sent += 1
+                timestamp = datetime.now(timezone.utc).isoformat()
+                try:
+                    heartbeat = client.session_heartbeat()
+                except RuntimeError as exc:
+                    consecutive_failures += 1
+                    print(
+                        json.dumps(
+                            {
+                                "ok": False,
+                                "event": "heartbeat",
+                                "iteration": sent,
+                                "timestamp": timestamp,
+                                "error": str(exc),
+                                "consecutive_failures": consecutive_failures,
+                            },
+                            indent=2,
+                        )
+                    )
+                else:
+                    ok = bool(heartbeat.get("ok")) if isinstance(heartbeat, dict) else bool(heartbeat)
+                    consecutive_failures = 0 if ok else (consecutive_failures + 1)
+                    print(
+                        json.dumps(
+                            {
+                                "ok": ok,
+                                "event": "heartbeat",
+                                "iteration": sent,
+                                "timestamp": timestamp,
+                                "response": heartbeat,
+                                "consecutive_failures": consecutive_failures,
+                            },
+                            indent=2,
+                        )
+                    )
+                if consecutive_failures >= max_failures:
+                    raise SystemExit(
+                        f"ara runtime: session keepalive exceeded max failures ({max_failures})"
+                    )
+                if iterations == 0 or sent < iterations:
+                    time.sleep(interval_seconds)
+        except KeyboardInterrupt:
+            print(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "event": "summary",
+                        "status": "interrupted",
+                        "iterations": sent,
+                    },
+                    indent=2,
+                )
+            )
+            return
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "event": "summary",
+                    "status": "completed",
+                    "iterations": sent,
+                },
+                indent=2,
+            )
+        )
+        return
+
+    if args.scope == "automation" and args.command == "list":
+        print(json.dumps(client.automation_list_jobs(), indent=2))
+        return
+
+    if args.scope == "automation" and args.command == "add":
+        payload = _parse_json_object_arg(args.payload_json, flag_name="--payload-json")
+        message = str(args.message or "").strip()
+        if message:
+            payload.setdefault("kind", "agent_turn")
+            payload["message"] = message
+            payload.setdefault("deliver", bool(args.deliver))
+        elif args.deliver:
+            payload["deliver"] = True
+        if not payload:
+            raise SystemExit("ara runtime: automation add requires --message or --payload-json")
+        schedule_kind = "every" if args.every_seconds is not None else "cron"
+        print(
+            json.dumps(
+                client.automation_create_job(
+                    name=args.name,
+                    schedule_kind=schedule_kind,
+                    timezone=args.timezone,
+                    every_seconds=args.every_seconds,
+                    schedule_expr=args.cron,
+                    payload=payload,
+                    execution_mode=args.execution_mode,
+                    misfire_policy=args.misfire_policy,
+                    max_retries=args.max_retries,
+                    retry_backoff_seconds=args.retry_backoff_seconds,
+                ),
+                indent=2,
+            )
+        )
+        return
+
+    if args.scope == "automation" and args.command == "update":
+        payload: Optional[dict[str, Any]] = None
+        if str(args.payload_json or "").strip():
+            payload = _parse_json_object_arg(args.payload_json, flag_name="--payload-json")
+        message = args.message
+        if message is not None:
+            if payload is None:
+                payload = {}
+            payload.setdefault("kind", "agent_turn")
+            payload["message"] = str(message).strip()
+        if args.deliver:
+            if payload is None:
+                payload = {}
+            payload["deliver"] = True
+
+        enabled: Optional[bool] = None
+        if args.enable and args.disable:
+            raise SystemExit("ara runtime: automation update cannot set both --enable and --disable")
+        if args.enable:
+            enabled = True
+        elif args.disable:
+            enabled = False
+
+        print(
+            json.dumps(
+                client.automation_update_job(
+                    job_id=args.job_id,
+                    name=args.name,
+                    enabled=enabled,
+                    payload=payload,
+                    max_retries=args.max_retries,
+                    retry_backoff_seconds=args.retry_backoff_seconds,
+                ),
+                indent=2,
+            )
+        )
+        return
+
+    if args.scope == "automation" and args.command == "remove":
+        if not bool(args.yes):
+            raise SystemExit("ara runtime: automation remove requires --yes")
+        result = client.automation_delete_job_safe(
+            job_id=args.job_id,
+            disable_on_failure=not bool(args.no_disable_fallback),
+        )
+        print(json.dumps(result, indent=2))
+        if not bool(result.get("ok")):
+            raise SystemExit("ara runtime: automation remove failed")
+        return
+
+    if args.scope == "automation" and args.command == "purge":
+        if not bool(args.all):
+            raise SystemExit("ara runtime: automation purge requires --all")
+        if not bool(args.yes):
+            raise SystemExit("ara runtime: automation purge requires --yes")
+        result = client.automation_purge_jobs(
+            disable_on_failure=not bool(args.no_disable_fallback),
+        )
+        print(json.dumps(result, indent=2))
+        if not bool(result.get("ok")):
+            raise SystemExit("ara runtime: automation purge had failures")
+        return
+
+    if args.scope == "automation" and args.command == "enable":
+        print(
+            json.dumps(
+                client.automation_update_job(job_id=args.job_id, enabled=True),
+                indent=2,
+            )
+        )
+        return
+
+    if args.scope == "automation" and args.command == "disable":
+        print(
+            json.dumps(
+                client.automation_update_job(job_id=args.job_id, enabled=False),
+                indent=2,
+            )
+        )
+        return
+
+    if args.scope == "automation" and args.command == "runs":
+        print(json.dumps(client.automation_list_runs(state=args.state), indent=2))
+        return
+
+    if args.scope == "automation" and args.command == "replay":
+        print(json.dumps(client.automation_replay_run(run_id=args.run_id), indent=2))
         return
 
     if args.scope == "capabilities":
@@ -3585,9 +4106,9 @@ def run_auth_cli(argv: Optional[list[str]] = None) -> None:
     p_login.add_argument("--no-browser", action="store_true")
     p_login.add_argument(
         "--auth-flow",
-        choices=["auto", "localhost", "poll"],
-        default="auto",
-        help="Login transport: localhost callback, polling-only, or auto fallback.",
+        choices=["poll"],
+        default="poll",
+        help="Login transport (polling-only).",
     )
     p_login.add_argument("--supabase-url", default="")
     p_login.add_argument("--supabase-anon-key", default="")
@@ -3707,37 +4228,16 @@ def run_auth_cli(argv: Optional[list[str]] = None) -> None:
     if provider not in _CLI_OAUTH_ALLOWED_PROVIDERS:
         allowed = ", ".join(sorted(_CLI_OAUTH_ALLOWED_PROVIDERS))
         raise SystemExit(f"ara auth: unsupported OAuth provider '{provider}'. Allowed providers: {allowed}.")
-    auth_flow = str(args.auth_flow or "auto").strip().lower() or "auto"
     code_verifier = _pkce_code_verifier()
     code_challenge = _pkce_code_challenge(code_verifier)
     try:
-        callback_payload: dict[str, str] | None = None
-        if auth_flow in {"auto", "localhost"}:
-            expected_state = secrets.token_urlsafe(32)
-            try:
-                callback_payload = _collect_oauth_callback_via_localhost(
-                    supabase_url=supabase_url,
-                    provider=provider,
-                    code_challenge=code_challenge,
-                    expected_state=expected_state,
-                    timeout_seconds=int(args.timeout_seconds or 180),
-                    open_browser=not bool(args.no_browser),
-                )
-            except RuntimeError:
-                if auth_flow == "localhost":
-                    raise
-                print(
-                    "Warning: localhost callback failed; falling back to polling login flow.",
-                    file=sys.stderr,
-                )
-        if callback_payload is None:
-            callback_payload = _collect_oauth_callback_via_polling(
-                api_base_url=api_base_url,
-                provider=provider,
-                code_challenge=code_challenge,
-                timeout_seconds=int(args.timeout_seconds or 180),
-                open_browser=not bool(args.no_browser),
-            )
+        callback_payload = _collect_oauth_callback_via_polling(
+            api_base_url=api_base_url,
+            provider=provider,
+            code_challenge=code_challenge,
+            timeout_seconds=int(args.timeout_seconds or 180),
+            open_browser=not bool(args.no_browser),
+        )
         auth_code = str(callback_payload.get("code") or "").strip()
         redirect_uri = str(callback_payload.get("redirect_uri") or "").strip()
         if not auth_code:
