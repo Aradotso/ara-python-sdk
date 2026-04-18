@@ -4838,6 +4838,9 @@ def _run_app_cli(app: _AutomationApp | dict[str, Any], argv: Optional[list[str]]
     _deploy_parent.add_argument("--warm", default="false")
     _deploy_parent.add_argument("--warm-agent", default="")
     _deploy_parent.add_argument("--on-existing", choices=["update", "error"], default="update")
+    _deploy_parent.add_argument("--cron", default="")
+    _deploy_parent.add_argument("--every-seconds", type=int, default=None)
+    _deploy_parent.add_argument("--timezone", default="UTC")
 
     sub.add_parser("deploy", parents=[_deploy_parent])
     sub.add_parser("up", parents=[_deploy_parent])
@@ -4855,9 +4858,64 @@ def _run_app_cli(app: _AutomationApp | dict[str, Any], argv: Optional[list[str]]
     if command == "up":
         command = "deploy"
 
-    client = AraClient.from_env(manifest=manifest, cwd=os.getcwd())
-
     if command == "deploy":
+        manifest_for_deploy = manifest
+        cron_expr = str(args.cron or "").strip()
+        if cron_expr and args.every_seconds is not None:
+            raise SystemExit("Cannot combine --cron and --every-seconds on ara deploy.")
+        if cron_expr or args.every_seconds is not None:
+            manifest_for_deploy = json.loads(json.dumps(manifest))
+            agent_block = (
+                manifest_for_deploy.get("agent")
+                if isinstance(manifest_for_deploy.get("agent"), dict)
+                else {}
+            )
+            agents = (
+                agent_block.get("agents")
+                if isinstance(agent_block.get("agents"), list)
+                else []
+            )
+            target_agent: Optional[dict[str, Any]] = None
+            for candidate in agents:
+                if isinstance(candidate, dict) and candidate.get("entrypoint") is True:
+                    target_agent = candidate
+                    break
+            if target_agent is None:
+                for candidate in agents:
+                    if isinstance(candidate, dict):
+                        target_agent = candidate
+                        break
+            if not isinstance(target_agent, dict):
+                raise SystemExit(
+                    "Schedule flags require an Automation agent in app.py (no deployable agent found)."
+                )
+            target_agent_id = str(target_agent.get("id") or "").strip()
+            if not target_agent_id:
+                raise SystemExit("Schedule flags require a non-empty agent id in Automation(...).")
+            schedule_spec: dict[str, Any] = {
+                "id": "cli-managed-schedule",
+                "run": {
+                    "type": "agent",
+                    "agent_id": target_agent_id,
+                    "input": {"trigger": "schedule", "source": "ara-cli"},
+                },
+            }
+            if cron_expr:
+                schedule_spec["kind"] = "cron"
+                schedule_spec["cron"] = cron_expr
+                schedule_spec["timezone"] = str(args.timezone or "UTC").strip() or "UTC"
+            else:
+                schedule_spec["kind"] = "every"
+                schedule_spec["every_seconds"] = int(args.every_seconds or 0)
+            normalized_schedule = _normalize_schedule_spec(schedule_spec)
+            existing = (
+                target_agent.get("schedules")
+                if isinstance(target_agent.get("schedules"), list)
+                else []
+            )
+            target_agent["schedules"] = _merge_schedule_specs(existing, [normalized_schedule])
+
+        client = AraClient.from_env(manifest=manifest_for_deploy, cwd=os.getcwd())
         deploy_kwargs: dict[str, Any] = {
             "activate": str(args.activate).lower() != "false",
             "key_name": args.key_name or None,
@@ -4877,7 +4935,7 @@ def _run_app_cli(app: _AutomationApp | dict[str, Any], argv: Optional[list[str]]
             json.dumps(
                 {
                     "ok": True,
-                    "slug": str(manifest.get("slug") or ""),
+                    "slug": str(manifest_for_deploy.get("slug") or ""),
                     "runtime_key_created": bool(deploy_out.get("runtime_key_created")),
                     "runtime_key": str(deploy_out.get("runtime_key") or ""),
                     "warmup_run_id": warmup_run_id,
@@ -4886,6 +4944,8 @@ def _run_app_cli(app: _AutomationApp | dict[str, Any], argv: Optional[list[str]]
             )
         )
         return
+
+    client = AraClient.from_env(manifest=manifest, cwd=os.getcwd())
 
     if command == "run":
         run_id = _new_run_id()

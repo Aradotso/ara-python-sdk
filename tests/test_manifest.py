@@ -232,6 +232,56 @@ def test_app_cli_rejects_removed_legacy_commands():
             core._run_app_cli(manifest, argv=[command])
 
 
+def test_deploy_cli_attaches_cron_schedule_to_entrypoint_agent(monkeypatch, tmp_path):
+    manifest = _manifest_with_runtime(runtime_profile={})
+    manifest["agent"] = {
+        "agents": [
+            {"id": "weekday-priority-agent", "entrypoint": True, "skills": []},
+        ]
+    }
+    captured: dict[str, object] = {}
+
+    class _FakeClient:
+        def __init__(self, manifest_arg):
+            self._manifest = manifest_arg
+
+        def deploy(self, **kwargs):
+            captured["manifest"] = self._manifest
+            captured["kwargs"] = kwargs
+            return {"runtime_key_created": False, "runtime_key": "", "warmup": None}
+
+    def _fake_from_env(cls, *, manifest, cwd):
+        _ = cls, cwd
+        return _FakeClient(manifest)
+
+    monkeypatch.setattr(core.AraClient, "from_env", classmethod(_fake_from_env))
+    monkeypatch.chdir(tmp_path)
+
+    core._run_app_cli(manifest, argv=["deploy", "--cron", "*/5 * * * *"])
+
+    resolved_manifest = captured["manifest"]
+    assert isinstance(resolved_manifest, dict)
+    agents = resolved_manifest.get("agent", {}).get("agents", [])
+    assert isinstance(agents, list) and agents
+    schedule = agents[0]["schedules"][0]
+    assert schedule["id"] == "cli-managed-schedule"
+    assert schedule["kind"] == "cron"
+    assert schedule["cron"] == "*/5 * * * *"
+    assert schedule["timezone"] == "UTC"
+    assert schedule["run"]["type"] == "agent"
+    assert schedule["run"]["agent_id"] == "weekday-priority-agent"
+
+
+def test_deploy_cli_rejects_mixed_cron_and_every_flags():
+    manifest = _manifest_with_runtime(runtime_profile={})
+    manifest["agent"] = {"agents": [{"id": "agent-a", "entrypoint": True, "skills": []}]}
+    with pytest.raises(SystemExit, match="Cannot combine --cron and --every-seconds"):
+        core._run_app_cli(
+            manifest,
+            argv=["deploy", "--cron", "*/5 * * * *", "--every-seconds", "300"],
+        )
+
+
 def test_top_level_module_does_not_expose_legacy_symbols():
     for symbol in (
         "App",
