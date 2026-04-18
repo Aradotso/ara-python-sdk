@@ -10,11 +10,15 @@
     <main class="wrap">
       <section class="card">
         <h1>Ara Session Chat UI</h1>
-        <p>Canonical direct-runtime demo (frontend -&gt; Ara API).</p>
+        <p>Direct chat demo (frontend -&gt; deployed Ara agent runtime).</p>
       </section>
 
       <section class="card">
         <div class="grid">
+          <div class="field">
+            <label for="apiBaseUrl">API Base URL</label>
+            <input id="apiBaseUrl" placeholder="https://api.ara.so" />
+          </div>
           <div class="field">
             <label for="appId">App ID</label>
             <input id="appId" placeholder="app_..." />
@@ -22,6 +26,10 @@
           <div class="field">
             <label for="runtimeKey">Runtime Key</label>
             <input id="runtimeKey" placeholder="ak_app_..." />
+          </div>
+          <div class="field">
+            <label for="appHeaderKey">App Header Key (optional alternative)</label>
+            <input id="appHeaderKey" placeholder="aik_app_..." />
           </div>
           <div class="field">
             <label for="agentId">Agent ID</label>

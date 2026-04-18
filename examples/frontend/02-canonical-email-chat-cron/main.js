@@ -1,15 +1,17 @@
-const FIXED_API_BASE_URL = "https://api.ara.so";
-
 const defaults = {
+  apiBaseUrl: import.meta.env.VITE_ARA_API_BASE_URL || "https://api.ara.so",
   appId: import.meta.env.VITE_ARA_APP_ID || "",
   runtimeKey: import.meta.env.VITE_ARA_RUNTIME_KEY || "",
-  agentId: import.meta.env.VITE_ARA_CHAT_AGENT_ID || "demo_chat",
+  appHeaderKey: import.meta.env.VITE_ARA_APP_HEADER_KEY || "",
+  agentId: import.meta.env.VITE_ARA_CHAT_AGENT_ID || "weekday-priority-agent",
   extraInput: import.meta.env.VITE_ARA_EXTRA_INPUT_JSON || "",
 };
 
 const els = {
+  apiBaseUrl: document.getElementById("apiBaseUrl"),
   appId: document.getElementById("appId"),
   runtimeKey: document.getElementById("runtimeKey"),
+  appHeaderKey: document.getElementById("appHeaderKey"),
   agentId: document.getElementById("agentId"),
   extraInput: document.getElementById("extraInput"),
   saveConfig: document.getElementById("saveConfig"),
@@ -31,8 +33,10 @@ function loadConfig() {
   try {
     const parsed = JSON.parse(raw);
     return {
+      apiBaseUrl: pickNonEmpty(parsed?.apiBaseUrl, defaults.apiBaseUrl),
       appId: pickNonEmpty(parsed?.appId, defaults.appId),
       runtimeKey: pickNonEmpty(parsed?.runtimeKey, defaults.runtimeKey),
+      appHeaderKey: pickNonEmpty(parsed?.appHeaderKey, defaults.appHeaderKey),
       agentId: pickNonEmpty(parsed?.agentId, defaults.agentId),
       extraInput: typeof parsed?.extraInput === "string" ? parsed.extraInput : defaults.extraInput,
     };
@@ -43,8 +47,10 @@ function loadConfig() {
 
 function saveConfig() {
   const cfg = {
+    apiBaseUrl: pickNonEmpty(els.apiBaseUrl.value, defaults.apiBaseUrl),
     appId: pickNonEmpty(els.appId.value, defaults.appId),
     runtimeKey: pickNonEmpty(els.runtimeKey.value, defaults.runtimeKey),
+    appHeaderKey: pickNonEmpty(els.appHeaderKey.value, defaults.appHeaderKey),
     agentId: pickNonEmpty(els.agentId.value, defaults.agentId),
     extraInput: typeof els.extraInput.value === "string" ? els.extraInput.value.trim() : "",
   };
@@ -105,13 +111,18 @@ function parseExtraInput(raw) {
 }
 
 async function sendMessage(cfg, inputPayload) {
-  const url = `${FIXED_API_BASE_URL}/v1/apps/${cfg.appId}/run`;
+  const url = `${cfg.apiBaseUrl}/v1/apps/${cfg.appId}/run`;
+  const headers = {
+    "Content-Type": "application/json",
+  };
+  if (cfg.appHeaderKey) {
+    headers["X-Ara-App-Key"] = cfg.appHeaderKey;
+  } else {
+    headers.Authorization = `Bearer ${cfg.runtimeKey}`;
+  }
   const response = await fetch(url, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${cfg.runtimeKey}`,
-    },
+    headers,
     body: JSON.stringify({
       agent_id: cfg.agentId,
       workflow_id: cfg.agentId,
@@ -128,21 +139,27 @@ async function sendMessage(cfg, inputPayload) {
 }
 
 const initial = loadConfig();
+els.apiBaseUrl.value = initial.apiBaseUrl || defaults.apiBaseUrl;
 els.appId.value = initial.appId || "";
 els.runtimeKey.value = initial.runtimeKey || "";
+els.appHeaderKey.value = initial.appHeaderKey || "";
 els.agentId.value = initial.agentId || defaults.agentId;
 els.extraInput.value = initial.extraInput || "";
 
-addMessage("assistant", "Ready. This demo sends direct runtime requests to Ara API.");
+addMessage(
+  "assistant",
+  "Ready. This demo sends direct run requests to a deployed Ara agent. " +
+    "Use Runtime Key OR App Header Key.",
+);
 
 els.saveConfig.addEventListener("click", () => {
   saveConfig();
 });
 
-if (defaults.appId && defaults.runtimeKey) {
+if (defaults.appId && (defaults.runtimeKey || defaults.appHeaderKey)) {
   setStatus("Loaded App config from Vite env.");
 } else {
-  setStatus("Set app config in .env.local or the form.");
+  setStatus("Set API/App config in .env.local or the form.");
 }
 
 els.chatForm.addEventListener("submit", async (event) => {
@@ -154,8 +171,8 @@ els.chatForm.addEventListener("submit", async (event) => {
     setStatus("Set App ID first.");
     return;
   }
-  if (!cfg.runtimeKey) {
-    setStatus("Set Runtime Key first.");
+  if (!cfg.runtimeKey && !cfg.appHeaderKey) {
+    setStatus("Set Runtime Key or App Header Key first.");
     return;
   }
   let extraInput = {};

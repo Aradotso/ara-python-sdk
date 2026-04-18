@@ -1,386 +1,63 @@
 import importlib.util
 import io
-from types import ModuleType
 import urllib.error
 
 import pytest
 
-from ara_sdk import App, Secret, fastapi_endpoint, invoke, runtime, sandbox, schedule, scheduler
+import ara_sdk
 from ara_sdk import core
 
 
-def test_app_uses_project_name_for_name_and_slug():
-    app = App("team-internal-app")
-    assert app.name == "team-internal-app"
-    assert app.slug == "team-internal-app"
+def _manifest_with_runtime(runtime_profile: dict) -> dict:
+    return {
+        "name": "Test App",
+        "slug": "test-app",
+        "description": "",
+        "agent": {},
+        "workflows": [],
+        "interfaces": {},
+        "runtime_profile": runtime_profile,
+    }
 
 
-def test_app_accepts_project_name_keyword_argument():
-    app = App(project_name="team-internal-app")
-    assert app.name == "team-internal-app"
-    assert app.slug == "team-internal-app"
+def test_minimal_automation_declaration_builds_manifest_without_app_variable():
+    core._pop_minimal_app()
 
-
-def test_app_rejects_non_dns_safe_project_name():
-    with pytest.raises(ValueError, match="project_name must match"):
-        App("Team_Internal_App")
-
-
-def test_agent_registers_profile_and_workflow():
-    app = App("test-app")
-
-    @app.agent(
-        id="booking-coordinator",
-        entrypoint=True,
-        skills=["send_email", "automation_create"],
-        schedules=[
-            schedule.cron(
-                id="weekday-digest",
-                expr="0 10 * * 1-5",
-                timezone="UTC",
-                run=invoke.agent("booking-coordinator", input={"message": "send digest"}),
-            )
-        ],
-        runtime=runtime(memory_mb=1024),
-        sandbox=sandbox(max_concurrency=3),
-    )
-    def booking(payload: dict) -> str:
-        """Coordinate booking agent workflows."""
-        return "Coordinate booking tasks."
-
-    manifest = app.manifest
-    agents = manifest["agent"]["agents"]
-    profiles = manifest["agent"]["profiles"]
-    workflows = manifest["workflows"]
-    subagents = manifest["agent"]["subagents"]
-
-    assert agents[0]["id"] == "booking-coordinator"
-    assert agents[0]["skills"] == ["send_email", "automation_create"]
-    assert agents[0]["schedules"][0]["kind"] == "cron"
-    assert profiles[0]["id"] == "booking-coordinator"
-    assert workflows[0]["id"] == "booking-coordinator"
-    assert workflows[0]["trigger"]["type"] == "api"
-    assert workflows[1]["trigger"]["type"] == "cron"
-    assert subagents[0]["sandbox"]["max_concurrency"] == 3
-
-
-def test_agent_omits_skills_when_unspecified_and_strips_runtime_secret_defs():
-    app = App("no-skills-agent-app")
-    agent_runtime = runtime(
-        secrets=[Secret.from_dict({"OPENAI_API_KEY": "sk-test"})],
-    )
-
-    @app.agent(
-        id="general-agent",
-        runtime=agent_runtime,
-    )
-    def general_agent(payload: dict) -> str:
-        """General agent."""
-        return "Handle generic requests."
-
-    manifest = app.manifest
-    agents = manifest["agent"]["agents"]
-    profiles = manifest["agent"]["profiles"]
-    subagents = manifest["agent"]["subagents"]
-
-    assert "skills" not in agents[0]
-    assert "skills" not in profiles[0]
-    assert "__secret_definitions" not in agents[0]["runtime"]
-    assert "__secret_definitions" not in subagents[0]["runtime"]
-
-
-def test_agent_uses_exact_function_name_when_id_omitted():
-    app = App("implicit-agent-id-app")
-
-    @app.agent(entrypoint=True)
-    def title_case_agent(payload: dict) -> str:
-        return "Return title case instructions."
-
-    agents = app.manifest["agent"]["agents"]
-    assert agents[0]["id"] == "title_case_agent"
-
-
-def test_agent_rejects_removed_legacy_kwargs():
-    app = App("legacy-agent-args-app")
-
-    with pytest.raises(TypeError):
-        app.agent(id="legacy-agent", task="legacy")
-    with pytest.raises(TypeError):
-        app.agent(id="legacy-agent", instructions="legacy")
-    with pytest.raises(TypeError):
-        app.agent(id="legacy-agent", prompt_factory=True)
-
-
-def test_fastapi_endpoint_is_emitted_in_manifest_interfaces():
-    app = App("fastapi-endpoint-app")
-
-    @app.agent(id="ingest-agent")
-    @fastapi_endpoint(
-        method="post",
-        path="/hooks/inbound",
-        label="lead-intake",
-        auth="header",
-        auth_header_name="X-Endpoint-Key",
-        auth_secret_env="LEAD_INTAKE_SECRET",
-        docs=True,
-    )
-    def ingest(payload: dict) -> str:
-        return "Ingest inbound webhook payloads."
-
-    manifest = app.manifest
-    endpoint_rows = manifest["interfaces"]["fastapi_endpoints"]
-    assert len(endpoint_rows) == 1
-    endpoint = endpoint_rows[0]
-    assert endpoint["type"] == "fastapi_endpoint"
-    assert endpoint["method"] == "POST"
-    assert endpoint["path"] == "/hooks/inbound"
-    assert endpoint["label"] == "lead-intake"
-    assert endpoint["docs"] is True
-    assert endpoint["agent_id"] == "ingest-agent"
-    assert endpoint["workflow_id"] == "ingest-agent"
-    assert endpoint["auth"]["mode"] == "header"
-    assert endpoint["auth"]["header_name"] == "X-Endpoint-Key"
-    assert endpoint["auth"]["secret_env"] == "LEAD_INTAKE_SECRET"
-
-
-def test_fastapi_endpoint_works_with_reversed_decorator_order():
-    app = App("fastapi-endpoint-reversed-order")
-
-    @fastapi_endpoint(auth="bearer")
-    @app.agent(id="router-agent")
-    def route(payload: dict) -> str:
-        return "Route inbound API requests."
-
-    endpoint_rows = app.manifest["interfaces"]["fastapi_endpoints"]
-    assert len(endpoint_rows) == 1
-    endpoint = endpoint_rows[0]
-    assert endpoint["agent_id"] == "router-agent"
-    assert endpoint["path"] == "/route"
-    assert endpoint["auth"]["mode"] == "bearer"
-    assert endpoint["auth"]["secret_env"] == "ARA_ENDPOINT_ROUTE_SECRET"
-
-
-def test_fastapi_endpoint_rejects_invalid_method_and_auth_mode():
-    with pytest.raises(ValueError, match="method"):
-        @fastapi_endpoint(method="TRACE")
-        def _bad_method(payload: dict) -> str:
-            return "noop"
-
-    with pytest.raises(ValueError, match="auth"):
-        @fastapi_endpoint(auth="mystery")
-        def _bad_auth(payload: dict) -> str:
-            return "noop"
-
-
-def _load_module_from_path(path) -> ModuleType:
-    spec = importlib.util.spec_from_file_location("future_agent_module", str(path))
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_agent_accepts_postponed_str_return_annotation(tmp_path):
-    module_path = tmp_path / "future_agent_module.py"
-    module_path.write_text(
-        """
-from __future__ import annotations
-
-from ara_sdk import App
-
-app = App("future-agent")
-
-@app.agent(id="future-agent")
-def future_agent(payload: dict) -> str:
-    return "Build instructions from payload."
-""".strip()
-        + "\n",
-        encoding="utf-8",
-    )
-
-    module = _load_module_from_path(module_path)
-    manifest = module.app.manifest
-    agent_row = manifest["agent"]["agents"][0]
-    assert agent_row["id"] == "future-agent"
-    assert "prompt_factory" in agent_row
-
-
-def test_tool_manifest_shape():
-    app = App("tooling-app")
-
+    @core.tool
     def send_email(to: str, subject: str, body: str) -> dict:
-        """Send an email payload."""
-        return {"ok": True, "to": to, "subject": subject, "body": body}
+        _ = to, subject, body
+        sender = core.secret("CRON_EMAIL_FROM")
+        return {"ok": True, "from": sender}
 
-    app.tool()(send_email)
-
-    manifest = app.manifest
-    tools = manifest["agent"]["tools"]
-
-    assert tools[0]["type"] == "function"
-    assert tools[0]["function"]["name"] == "send_email"
-    assert tools[0]["function"]["description"] == "Send an email payload."
-    assert tools[0]["function"]["parameters"]["properties"]["subject"]["type"] == "string"
-    assert tools[0]["function_name"] == "send_email"
-    assert tools[0]["source"].startswith("def send_email")
-
-
-def test_tool_uses_exact_function_name_when_id_omitted():
-    app = App("tooling-app")
-
-    @app.tool()
-    def title_case_decorator(text: str):
-        """Title-case helper."""
-        return {"ok": True, "result": text.title()}
-
-    tools = app.manifest["agent"]["tools"]
-    assert tools[0]["function"]["name"] == "title_case_decorator"
-
-
-def test_tool_supports_multiline_decorator_arguments():
-    app = App("tooling-app")
-
-    @app.tool(id="send_email")
-    def send_email(to: str):
-        """Send an email payload."""
-        return {"ok": True, "to": to}
-
-    tools = app.manifest["agent"]["tools"]
-    assert len(tools) == 1
-    assert tools[0]["function"]["name"] == "send_email"
-    assert tools[0]["source"].startswith("def send_email")
-
-
-def test_schedule_and_scheduler_builders():
-    job = schedule.every(
-        seconds=3600,
-        run=invoke.tool("send_email", args={"to": "sveinung@ara.so", "subject": "hi", "body": "hello"}),
+    core.Automation(
+        "weekday-priority-agent",
+        system_instructions="Send weekday priority digest.",
+        tools=[send_email],
     )
-    payload = scheduler.create(job, app_id="app_demo_1")
-    assert payload["tool"] == "automation_create"
-    assert payload["args"]["execution_kind"] == "app_tool_call"
-    assert payload["args"]["app_id"] == "app_demo_1"
-    assert payload["args"]["name"] == "send_email-every-3600s"
-    assert payload["args"]["tool_name"] == "send_email"
 
-
-def test_app_schedule_decorator_binds_multiple_triggers_to_agent():
-    app = App("schedule-decorator-agent-app")
-
-    @app.schedule(
-        cron="0 9 * * 1-5",
-        at=["14:30", "2026-04-11T16:45:00Z"],
-    )
-    @app.agent(entrypoint=True)
-    def planner(input: dict) -> str:
-        return f"Plan jobs from input: {input}"
-
+    app = core._pop_minimal_app()
+    assert app is not None
     manifest = app.manifest
-    agent_row = next(row for row in manifest["agent"]["agents"] if row["id"] == "planner")
-    schedules = agent_row["schedules"]
-    assert len(schedules) == 3
-    assert {s["kind"] for s in schedules} == {"cron"}
-    for schedule_spec in schedules:
-        assert schedule_spec["run"]["type"] == "agent"
-        assert schedule_spec["run"]["agent_id"] == "planner"
-
-    schedule_ids = {s["id"] for s in schedules}
-    assert "planner--cron" in schedule_ids
-    one_shot_schedule = next(s for s in schedules if s.get("one_shot_at"))
-    assert one_shot_schedule["one_shot_at"] == "2026-04-11T16:45:00Z"
+    assert manifest["slug"] == "weekday-priority-agent"
+    assert manifest["agent"]["agents"][0]["id"] == "weekday-priority-agent"
+    assert manifest["agent"]["agents"][0]["skills"] == ["send_email"]
+    assert manifest["agent"]["tools"][0]["required_env"] == ["CRON_EMAIL_FROM"]
 
 
-def test_app_schedule_decorator_binds_tool_and_emits_pipeline_workflow():
-    app = App("schedule-decorator-tool-app")
+def test_from_env_uses_api_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("ARA_API_BASE_URL", "https://api.ara.so")
+    monkeypatch.setenv("ARA_API_KEY", "ara_api_key_primary_0123456789abcdef")
 
-    @app.agent(entrypoint=True)
-    def ops(input: dict) -> str:
-        return f"Ops agent: {input}"
-
-    @app.schedule(at=["03:15"])
-    @app.tool()
-    def cleanup_cache(path: str = "/tmp/cache") -> dict:
-        return {"ok": True, "path": path}
-
-    manifest = app.manifest
-    agent_row = next(row for row in manifest["agent"]["agents"] if row["id"] == "ops")
-    schedules = agent_row["schedules"]
-    assert len(schedules) == 1
-    schedule_spec = schedules[0]
-    assert schedule_spec["kind"] == "cron"
-    assert schedule_spec["run"]["type"] == "tool"
-    assert schedule_spec["run"]["tool_name"] == "cleanup_cache"
-    assert schedule_spec["run"]["args"] == {}
-
-    scheduled_workflow = next(wf for wf in manifest["workflows"] if wf["id"] == "ops--cleanup-cache")
-    assert scheduled_workflow["mode"] == "pipeline"
-    assert scheduled_workflow["pipeline"][0]["tool_name"] == "cleanup_cache"
+    client = core.AraClient.from_env(manifest=_manifest_with_runtime(runtime_profile={}), cwd=str(tmp_path))
+    assert client.http.api_key == "ara_api_key_primary_0123456789abcdef"
 
 
-def test_app_schedule_rejects_invalid_at_token():
-    app = App("schedule-invalid-at-app")
-
-    with pytest.raises(ValueError, match="at"):
-        @app.schedule(at=["not-a-time"])
-        def _bad_at_spec(input: dict) -> str:
-            return str(input)
-
-
-def test_schedule_rejects_legacy_agent_field():
-    with pytest.raises(ValueError, match="invoke\\.agent\\(\\.\\.\\.\\) requires non-empty agent id"):
-        schedule.cron(
-            expr="0 9 * * *",
-            run={"type": "agent", "agent": "booking-coordinator"},
-        )
-
-
-def test_sandbox_allows_multisandbox_spawn_shape():
-    cfg = sandbox(
-        policy="dedicated",
-        key="planner",
-        allow_spawn=True,
-        spawn_to=["researcher", "verifier"],
-        max_spawn_depth=3,
-        max_children_per_parent=4,
-        max_total_child_sessions_per_run=9,
-        ephemeral_ttl_minutes=5,
-        child_policy="ephemeral",
-        child_runtime=runtime(memory_mb=1024),
-    )
-    assert cfg["policy"] == "dedicated"
-    assert cfg["key"] == "planner"
-    assert cfg["spawn"]["allow"] is True
-    assert cfg["spawn"]["to"] == ["researcher", "verifier"]
-    assert cfg["spawn"]["max_depth"] == 3
-    assert cfg["spawn"]["max_children_per_parent"] == 4
-    assert cfg["spawn"]["max_total_child_sessions_per_run"] == 9
-    assert cfg["spawn"]["ephemeral_ttl_minutes"] == 5
-    assert cfg["spawn"]["child_policy"] == "ephemeral"
-    assert cfg["spawn"]["child_runtime"]["memory_mb"] == 1024
-
-
-def test_sandbox_rejects_unknown_policy():
-    with pytest.raises(ValueError, match="sandbox\\(policy=\\.\\.\\.\\) must be one of"):
-        sandbox(policy="invalid-policy")
-
-
-def test_sandbox_rejects_spawn_limit_exceeded():
-    with pytest.raises(ValueError, match="max_spawn_depth"):
-        sandbox(
-            policy="dedicated",
-            allow_spawn=True,
-            max_spawn_depth=99,
-        )
-
-
-def test_sandbox_rejects_non_list_spawn_to():
-    with pytest.raises(ValueError, match="expects a list\\[str\\]"):
-        sandbox(
-            policy="dedicated",
-            allow_spawn=True,
-            spawn_to="researcher",  # type: ignore[arg-type]
-        )
+def test_from_env_requires_api_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("ARA_API_BASE_URL", "https://api.ara.so")
+    monkeypatch.delenv("ARA_API_KEY", raising=False)
+    monkeypatch.setattr(core, "_resolve_control_plane_bearer", lambda: "")
+    with pytest.raises(RuntimeError, match=r"No credentials found\. Set ARA_API_KEY or run `ara auth login`\.$"):
+        core.AraClient.from_env(manifest=_manifest_with_runtime(runtime_profile={}), cwd=str(tmp_path))
 
 
 def test_http_error_redacts_response_body_by_default(monkeypatch):
@@ -432,720 +109,129 @@ def test_http_error_includes_response_body_in_debug_mode(monkeypatch):
     assert details in message
 
 
-def test_runtime_includes_env_and_secret_refs():
-    local_secret = Secret.from_dict({"OPENAI_API_KEY": "sk-local"})
-    profile = runtime(
-        model="google/gemini-2.5-flash",
-        env={"APP_MODE": "production", "MAX_RETRIES": 3},
-        secrets=[
-            Secret.from_name("provider-shared", required_keys=["OPENAI_API_KEY"]),
-            local_secret,
-            "provider-shared",
-        ],
+def test_app_cli_rejects_removed_legacy_commands():
+    manifest = _manifest_with_runtime(runtime_profile={})
+    for command in ("events", "run-async", "run-status", "setup", "setup-auth", "invite"):
+        with pytest.raises(SystemExit):
+            core._run_app_cli(manifest, argv=[command])
+
+
+def test_top_level_module_does_not_expose_legacy_symbols():
+    for symbol in (
+        "App",
+        "Secret",
+        "fastapi_endpoint",
+        "invoke",
+        "schedule",
+        "scheduler",
+        "runtime",
+        "sandbox",
+        "entrypoint",
+        "file",
+        "local_file",
+        "AraRuntimeClient",
+    ):
+        assert not hasattr(ara_sdk, symbol)
+
+
+def test_deploy_reconciles_when_secret_refs_are_added_during_plan(monkeypatch, tmp_path):
+    class _FakeHttp:
+        def list_apps(self):
+            return {"apps": []}
+
+        def create_app(self, body):
+            _ = body
+            return {"app": {"id": "app_test_1"}}
+
+        def update_app(self, app_id, body):
+            _ = app_id, body
+            return {"ok": True}
+
+        def create_key(self, app_id, *, name, requests_per_minute):
+            _ = app_id, name, requests_per_minute
+            return {"key": "ak_app_test"}
+
+    client = core.AraClient(
+        manifest=_manifest_with_runtime(runtime_profile={}),
+        api_base_url="https://api.ara.so",
+        api_key="token",
+        cwd=tmp_path,
     )
-    assert profile["model"] == "google/gemini-2.5-flash"
-    assert profile["env"] == {"APP_MODE": "production", "MAX_RETRIES": "3"}
-    assert profile["secret_refs"] == [
-        {"name": "provider-shared", "required_keys": ["OPENAI_API_KEY"]},
-        {"name": local_secret.name},
-    ]
-    assert "__secret_definitions" in profile
-    assert len(profile["__secret_definitions"]) == 2
+    client.http = _FakeHttp()
+
+    def _fake_extract(self, runtime_profile):
+        _ = self
+        out = dict(runtime_profile)
+        out["secret_refs"] = [{"name": "sdk-dotenv-abcd1234"}]
+        return [], out
+
+    captured: dict[str, bool] = {}
+
+    def _fake_sync(self, app_id, definitions, *, reconcile_runtime_secrets):
+        _ = self, app_id, definitions
+        captured["reconcile_runtime_secrets"] = bool(reconcile_runtime_secrets)
+        return {"synced": [], "referenced_only": []}
+
+    monkeypatch.setattr(core.AraClient, "_extract_secret_sync_plan", _fake_extract)
+    monkeypatch.setattr(core.AraClient, "_sync_secret_definitions", _fake_sync)
+
+    out = client.deploy()
+    assert out["app_id"] == "app_test_1"
+    assert captured["reconcile_runtime_secrets"] is True
 
 
-def test_from_env_uses_api_key(monkeypatch, tmp_path):
-    monkeypatch.setenv("ARA_API_BASE_URL", "https://api.ara.so")
-    monkeypatch.setenv("ARA_API_KEY", "ara_api_key_primary_0123456789abcdef")
-
-    client = core.AraClient.from_env(manifest=_manifest_with_runtime(runtime_profile={}), cwd=str(tmp_path))
-    assert client.http.api_key == "ara_api_key_primary_0123456789abcdef"
-
-
-def test_from_env_requires_api_key(monkeypatch, tmp_path):
-    monkeypatch.setenv("ARA_API_BASE_URL", "https://api.ara.so")
-    monkeypatch.delenv("ARA_API_KEY", raising=False)
-    with pytest.raises(RuntimeError, match=r"No credentials found\. Set ARA_API_KEY or run `ara auth login`\.$"):
-        core.AraClient.from_env(manifest=_manifest_with_runtime(runtime_profile={}), cwd=str(tmp_path))
+def test_internal_schedule_binding_uses_private_builder_instances():
+    entries = [{"id": "daily-email", "kind": "cron", "cron": "0 9 * * *", "timezone": "UTC"}]
+    bound = core._bind_schedule_entries_to_target(entries, target_kind="tool", target_id="send_email")
+    assert bound[0]["run"]["type"] == "tool"
+    assert bound[0]["run"]["tool_name"] == "send_email"
 
 
-def test_runtime_auth_resolution_ignores_local_key_files(monkeypatch, tmp_path):
-    (tmp_path / ".runtime-key.local").write_text("ak_app_file_key\n", encoding="utf-8")
-    (tmp_path / ".app-header-key.local").write_text(
-        '{"key":"aik_app_file_key"}\n',
+def test_minimal_singleton_resets_across_distinct_script_modules(tmp_path):
+    def _load(path):
+        spec = importlib.util.spec_from_file_location(path.stem, str(path))
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    core._pop_minimal_app()
+
+    script_one = tmp_path / "automation_one.py"
+    script_one.write_text(
+        "\n".join(
+            [
+                "import ara_sdk as ara",
+                "@ara.tool",
+                "def tool_one() -> dict:",
+                "    return {'ok': True}",
+                "ara.Automation('first-automation', tools=[tool_one])",
+            ]
+        )
+        + "\n",
         encoding="utf-8",
     )
-    monkeypatch.delenv("ARA_RUNTIME_KEY", raising=False)
-    monkeypatch.delenv("ARA_APP_HEADER_KEY", raising=False)
 
-    client = core.AraClient(
-        manifest=_manifest_with_runtime(runtime_profile={}),
-        api_base_url="https://api.ara.so",
-        api_key="token",
-        cwd=tmp_path,
-    )
-
-    assert client._resolve_runtime_key() == ""
-    assert client._resolve_app_header_key() == ""
-
-
-def test_runtime_duplicate_secret_name_keeps_first_definition():
-    local_secret = Secret.from_dict({"OPENAI_API_KEY": "sk-overwrite-attempt"})
-    profile = runtime(
-        secrets=[
-            Secret.from_name(local_secret.name, required_keys=["OPENAI_API_KEY"]),
-            local_secret,
-        ],
-    )
-    assert profile["secret_refs"] == [
-        {"name": local_secret.name, "required_keys": ["OPENAI_API_KEY"]},
-    ]
-    definitions = profile["__secret_definitions"]
-    assert len(definitions) == 1
-    assert definitions[0].values is None
-
-
-def test_runtime_keeps_distinct_auto_named_local_secrets_with_same_keyset():
-    first = Secret.from_dict({"OPENAI_API_KEY": "sk-first"})
-    second = Secret.from_dict({"OPENAI_API_KEY": "sk-second"})
-    assert first.name == second.name
-
-    profile = runtime(secrets=[first, second])
-    refs = profile["secret_refs"]
-    definitions = profile["__secret_definitions"]
-
-    assert len(refs) == 2
-    assert len(definitions) == 2
-    assert refs[0]["name"] == first.name
-    assert refs[1]["name"] != refs[0]["name"]
-    assert refs[1]["name"].startswith(f"{first.name}-")
-    assert definitions[0].values == {"OPENAI_API_KEY": "sk-first"}
-    assert definitions[1].values == {"OPENAI_API_KEY": "sk-second"}
-
-
-def test_secret_rejects_reserved_keys():
-    with pytest.raises(ValueError):
-        runtime(env={"SESSION_ID": "abc"})
-    with pytest.raises(ValueError):
-        Secret.from_dict({"ARA_INTERNAL_TOKEN": "abc"})
-
-
-def test_secret_from_dotenv_and_dict(tmp_path):
-    dotenv = tmp_path / ".env.secrets"
-    dotenv.write_text("OPENAI_API_KEY=sk-123\nANTHROPIC_API_KEY=an-123\n", encoding="utf-8")
-    auto_secret = Secret.from_dotenv(filename=str(dotenv))
-    assert auto_secret.name.startswith("sdk-dotenv-")
-    assert auto_secret.values == {"OPENAI_API_KEY": "sk-123", "ANTHROPIC_API_KEY": "an-123"}
-    dotenv_rotated = tmp_path / ".env.secrets.rotated"
-    dotenv_rotated.write_text("OPENAI_API_KEY=sk-456\nANTHROPIC_API_KEY=an-789\n", encoding="utf-8")
-    assert Secret.from_dotenv(filename=str(dotenv_rotated)).name == auto_secret.name
-
-    named_keys_secret = Secret.from_dotenv(filename=str(dotenv))
-    assert named_keys_secret.values == {"OPENAI_API_KEY": "sk-123", "ANTHROPIC_API_KEY": "an-123"}
-
-    dict_secret = Secret.from_dict({"FOO": "bar"})
-    assert dict_secret.name.startswith("sdk-dict-")
-    assert Secret.from_dict({"FOO": "bar"}).name == dict_secret.name
-    assert Secret.from_dict({"FOO": "baz"}).name == dict_secret.name
-    explicit_dict_secret = Secret.from_dict({"CAL_API_KEY": "cal-123"})
-    assert explicit_dict_secret.values == {"CAL_API_KEY": "cal-123"}
-
-    with pytest.raises(TypeError):
-        Secret.from_dict("provider-local", {"FOO": "bar"})
-    with pytest.raises(TypeError):
-        Secret.from_dict({"FOO": "bar"}, name="provider-local")
-    with pytest.raises(TypeError):
-        Secret.from_dotenv("provider-local", filename=str(dotenv))
-    with pytest.raises(TypeError):
-        Secret.from_dotenv(filename=str(dotenv), required_keys=["OPENAI_API_KEY"])
-
-
-def test_secret_name_requires_two_or_more_characters():
-    with pytest.raises(ValueError, match="Secret name must match"):
-        Secret.from_name("a")
-
-    secret = Secret.from_name("ab")
-    assert secret.name == "ab"
-
-
-class _FakeHttp:
-    def __init__(self):
-        self.calls: list[str] = []
-        self.created_payload: dict | None = None
-        self.secret_rows: list[dict[str, object]] = []
-
-    def list_apps(self) -> dict:
-        self.calls.append("list_apps")
-        return {"apps": []}
-
-    def create_app(self, body: dict) -> dict:
-        self.calls.append("create_app")
-        self.created_payload = body
-        return {"app": {"id": "app_test_1"}}
-
-    def update_app(self, app_id: str, body: dict) -> dict:
-        self.calls.append("update_app")
-        return {"app": {"id": app_id, **body}}
-
-    def upsert_secret(self, app_id: str, *, name: str, values: dict[str, str]) -> dict:
-        _ = app_id
-        self.calls.append(f"upsert_secret:{name}")
-        found = False
-        for row in self.secret_rows:
-            if str(row.get("name") or "") == name:
-                row["key_names"] = sorted(values.keys())
-                found = True
-                break
-        if not found:
-            self.secret_rows.append({"name": name, "key_names": sorted(values.keys())})
-        return {"secret": {"name": name, "key_names": sorted(values.keys())}}
-
-    def list_secrets(self, app_id: str) -> dict:
-        _ = app_id
-        self.calls.append("list_secrets")
-        return {"secrets": [dict(row) for row in self.secret_rows]}
-
-    def delete_secret(self, app_id: str, name: str) -> None:
-        _ = app_id
-        self.calls.append(f"delete_secret:{name}")
-        self.secret_rows = [row for row in self.secret_rows if str(row.get("name") or "") != name]
-
-    def create_key(self, app_id: str, *, name: str, requests_per_minute: int) -> dict:
-        _ = (app_id, name, requests_per_minute)
-        self.calls.append("create_key")
-        return {"key": "ak_app_test"}
-
-    def list_x_keys(self, app_id: str) -> dict:
-        _ = app_id
-        self.calls.append("list_x_keys")
-        return {"keys": []}
-
-    def create_x_key(self, app_id: str, *, name: str, requests_per_minute: int) -> dict:
-        _ = (app_id, name, requests_per_minute)
-        self.calls.append("create_x_key")
-        return {"id": "apk_x_test_1", "key": "aik_app_test", "key_prefix": "aik_app_test"}
-
-    def revoke_x_key(self, app_id: str, key_id: str) -> None:
-        _ = (app_id, key_id)
-        self.calls.append("revoke_x_key")
-
-    def run_app(
-        self,
-        app_id: str,
-        *,
-        runtime_key: str | None = None,
-        app_header_key: str | None = None,
-        agent_id: str | None,
-        input_payload: dict,
-        warmup: bool = False,
-    ) -> dict:
-        _ = (app_id, runtime_key, app_header_key, agent_id, input_payload, warmup)
-        self.calls.append("run_app")
-        return {"ok": True}
-
-    def submit_async_run(
-        self,
-        app_id: str,
-        *,
-        runtime_key: str | None = None,
-        app_header_key: str | None = None,
-        agent_id: str | None,
-        input_payload: dict,
-        warmup: bool = False,
-        run_id: str | None = None,
-        idempotency_key: str | None = None,
-        response_mode: str = "poll",
-        callback: dict | None = None,
-    ) -> dict:
-        _ = (
-            app_id,
-            runtime_key,
-            app_header_key,
-            agent_id,
-            input_payload,
-            warmup,
-            run_id,
-            idempotency_key,
-            response_mode,
-            callback,
+    script_two = tmp_path / "automation_two.py"
+    script_two.write_text(
+        "\n".join(
+            [
+                "import ara_sdk as ara",
+                "@ara.tool",
+                "def tool_two() -> dict:",
+                "    return {'ok': True}",
+                "ara.Automation('second-automation', tools=[tool_two])",
+            ]
         )
-        self.calls.append("submit_async_run")
-        return {"ok": True, "run": {"run_id": run_id or "run_test_1", "status": "running"}}
-
-    def get_async_run_status(
-        self,
-        app_id: str,
-        run_id: str,
-        *,
-        runtime_key: str | None = None,
-        app_header_key: str | None = None,
-    ) -> dict:
-        _ = (app_id, run_id, runtime_key, app_header_key)
-        self.calls.append("get_async_run_status")
-        return {"ok": True, "run": {"run_id": run_id, "status": "completed"}}
-
-    def stream_logs(
-        self,
-        app_id: str,
-        *,
-        runtime_key: str | None = None,
-        app_header_key: str | None = None,
-    ):
-        _ = (app_id, runtime_key, app_header_key)
-        self.calls.append("stream_logs")
-        yield {
-            "timestamp": "2026-04-10T00:00:00Z",
-            "level": "info",
-            "run_id": "run_test_1",
-            "event_type": "run.started",
-            "message": "Run started",
-        }
-
-
-def _manifest_with_runtime(runtime_profile: dict) -> dict:
-    return {
-        "name": "Test App",
-        "slug": "test-app",
-        "description": "",
-        "agent": {},
-        "workflows": [],
-        "interfaces": {},
-        "runtime_profile": runtime_profile,
-    }
-
-
-def test_deploy_syncs_local_secrets_before_warmup(tmp_path):
-    local_secret = Secret.from_dict({"OPENAI_API_KEY": "sk-local"})
-    runtime_profile = runtime(
-        env={"APP_MODE": "dev"},
-        secrets=[
-            local_secret,
-            Secret.from_name("provider-shared", required_keys=["OPENAI_API_KEY"]),
-        ],
-    )
-    client = core.AraClient(
-        manifest=_manifest_with_runtime(runtime_profile),
-        api_base_url="https://api.ara.so",
-        api_key="token",
-        cwd=tmp_path,
-    )
-    fake_http = _FakeHttp()
-    client.http = fake_http
-
-    out = client.deploy(warm=True, warm_agent_id="booking-coordinator")
-
-    assert fake_http.created_payload is not None
-    assert "__secret_definitions" not in fake_http.created_payload["runtime_profile"]
-    assert fake_http.created_payload["runtime_profile"]["secret_refs"] == [
-        {"name": local_secret.name},
-        {"name": "provider-shared", "required_keys": ["OPENAI_API_KEY"]},
-    ]
-    assert fake_http.calls.index(f"upsert_secret:{local_secret.name}") < fake_http.calls.index("run_app")
-    assert out["secrets"] == {
-        "synced": [local_secret.name],
-        "referenced_only": ["provider-shared"],
-    }
-    assert out["runtime_key_created"] is True
-    assert out["runtime_key"] == "ak_app_test"
-
-
-def test_deploy_surfaces_backend_secrets_route_compat_error(tmp_path):
-    runtime_profile = runtime(
-        secrets=[Secret.from_dict({"OPENAI_API_KEY": "sk-local"})],
-    )
-    client = core.AraClient(
-        manifest=_manifest_with_runtime(runtime_profile),
-        api_base_url="https://api.ara.so",
-        api_key="token",
-        cwd=tmp_path,
+        + "\n",
+        encoding="utf-8",
     )
 
-    class _CompatHttp(_FakeHttp):
-        def upsert_secret(self, app_id: str, *, name: str, values: dict[str, str]) -> dict:
-            _ = (app_id, name, values)
-            raise RuntimeError(
-                "POST /apps/app_test_1/secrets failed (404). "
-                "Response body hidden by default; set ARA_SDK_DEBUG_HTTP_ERRORS=true to include it."
-            )
-
-    client.http = _CompatHttp()
-    with pytest.raises(RuntimeError, match="does not support App SDK secret routes"):
-        client.deploy()
-
-
-def test_deploy_surfaces_project_name_conflict_error(tmp_path):
-    client = core.AraClient(
-        manifest=_manifest_with_runtime(runtime_profile={}),
-        api_base_url="https://api.ara.so",
-        api_key="token",
-        cwd=tmp_path,
-    )
-
-    class _ConflictHttp(_FakeHttp):
-        def create_app(self, body: dict) -> dict:
-            _ = body
-            raise RuntimeError(
-                "POST /apps failed (409). "
-                "Response body hidden by default; set ARA_SDK_DEBUG_HTTP_ERRORS=true to include it."
-            )
-
-    client.http = _ConflictHttp()
-    with pytest.raises(RuntimeError, match="Project name is already taken"):
-        client.deploy()
-
-
-def test_deploy_ignores_delete_404_for_concurrent_secret_reconciliation(tmp_path):
-    local_secret = Secret.from_dict({"OPENAI_API_KEY": "sk-local"})
-    client = core.AraClient(
-        manifest=_manifest_with_runtime(runtime_profile=runtime(secrets=[local_secret])),
-        api_base_url="https://api.ara.so",
-        api_key="token",
-        cwd=tmp_path,
-    )
-
-    class _CompatDeleteHttp(_FakeHttp):
-        def list_apps(self) -> dict:
-            self.calls.append("list_apps")
-            return {"apps": [{"id": "app_existing_1", "slug": "test-app", "role": "owner"}]}
-
-        def delete_secret(self, app_id: str, name: str) -> None:
-            _ = (app_id, name)
-            raise RuntimeError(
-                "DELETE /apps/app_existing_1/secrets/stale-secret failed (404). "
-                "Response body hidden by default; set ARA_SDK_DEBUG_HTTP_ERRORS=true to include it."
-            )
-
-    fake_http = _CompatDeleteHttp()
-    fake_http.secret_rows = [
-        {"name": local_secret.name, "key_names": ["OPENAI_API_KEY"]},
-        {"name": "stale-secret", "key_names": ["OLD_KEY"]},
-    ]
-    client.http = fake_http
-
-    out = client.deploy()
-    assert out["app_id"] == "app_existing_1"
-    assert "delete_secret:stale-secret" not in fake_http.calls
-
-
-def test_deploy_defaults_to_update_when_app_exists(tmp_path):
-    client = core.AraClient(
-        manifest=_manifest_with_runtime(runtime_profile={}),
-        api_base_url="https://api.ara.so",
-        api_key="token",
-        cwd=tmp_path,
-    )
-
-    class _ExistingHttp(_FakeHttp):
-        def list_apps(self) -> dict:
-            self.calls.append("list_apps")
-            return {"apps": [{"id": "app_existing_1", "slug": "test-app", "role": "owner"}]}
-
-    fake_http = _ExistingHttp()
-    client.http = fake_http
-
-    out = client.deploy()
-
-    assert out["app_id"] == "app_existing_1"
-    assert "create_app" not in fake_http.calls
-    assert "update_app" in fake_http.calls
-
-
-def test_deploy_reconciles_app_secrets_to_runtime_refs(tmp_path):
-    local_secret = Secret.from_dict({"OPENAI_API_KEY": "sk-local"})
-    client = core.AraClient(
-        manifest=_manifest_with_runtime(runtime_profile=runtime(secrets=[local_secret])),
-        api_base_url="https://api.ara.so",
-        api_key="token",
-        cwd=tmp_path,
-    )
-
-    class _ExistingHttp(_FakeHttp):
-        def list_apps(self) -> dict:
-            self.calls.append("list_apps")
-            return {"apps": [{"id": "app_existing_1", "slug": "test-app", "role": "owner"}]}
-
-    fake_http = _ExistingHttp()
-    fake_http.secret_rows = [
-        {"name": "stale-secret", "key_names": ["OLD_KEY"]},
-        {"name": local_secret.name, "key_names": ["OPENAI_API_KEY"]},
-    ]
-    client.http = fake_http
-
-    _ = client.deploy()
-
-    assert "list_secrets" in fake_http.calls
-    assert "delete_secret:stale-secret" in fake_http.calls
-    assert f"delete_secret:{local_secret.name}" not in fake_http.calls
-
-
-def test_deploy_without_runtime_secrets_does_not_reconcile_app_secrets(tmp_path):
-    client = core.AraClient(
-        manifest=_manifest_with_runtime(runtime_profile={}),
-        api_base_url="https://api.ara.so",
-        api_key="token",
-        cwd=tmp_path,
-    )
-
-    class _ExistingHttp(_FakeHttp):
-        def list_apps(self) -> dict:
-            self.calls.append("list_apps")
-            return {"apps": [{"id": "app_existing_1", "slug": "test-app", "role": "owner"}]}
-
-    fake_http = _ExistingHttp()
-    fake_http.secret_rows = [{"name": "stale-secret", "key_names": ["OLD_KEY"]}]
-    client.http = fake_http
-
-    _ = client.deploy()
-
-    assert "list_secrets" not in fake_http.calls
-    assert all(not call.startswith("delete_secret:") for call in fake_http.calls)
-
-
-def test_setup_auth_creates_app_header_key_without_local_files(tmp_path, monkeypatch):
-    monkeypatch.delenv("ARA_RUNTIME_KEY", raising=False)
-    monkeypatch.delenv("ARA_APP_HEADER_KEY", raising=False)
-    client = core.AraClient(
-        manifest=_manifest_with_runtime(runtime_profile={}),
-        api_base_url="https://api.ara.so",
-        api_key="token",
-        cwd=tmp_path,
-    )
-
-    class _ExistingHttp(_FakeHttp):
-        def list_apps(self) -> dict:
-            self.calls.append("list_apps")
-            return {"apps": [{"id": "app_existing_1", "slug": "test-app", "role": "owner"}]}
-
-    fake_http = _ExistingHttp()
-    client.http = fake_http
-
-    out = client.setup_auth()
-
-    assert out["app_id"] == "app_existing_1"
-    assert out["runtime_key"] == "ak_app_test"
-    assert out["app_header_key_present"] is True
-    assert out["app_header_key_created"] is True
-    assert "create_x_key" in fake_http.calls
-
-
-def test_run_async_and_status_support_header_key(tmp_path):
-    client = core.AraClient(
-        manifest=_manifest_with_runtime(runtime_profile={}),
-        api_base_url="https://api.ara.so",
-        api_key="token",
-        cwd=tmp_path,
-    )
-
-    class _ExistingHttp(_FakeHttp):
-        def list_apps(self) -> dict:
-            self.calls.append("list_apps")
-            return {"apps": [{"id": "app_existing_1", "slug": "test-app", "role": "owner"}]}
-
-    fake_http = _ExistingHttp()
-    client.http = fake_http
-
-    submit = client.run_async(
-        agent_id="booking-coordinator",
-        input_payload={"message": "hello"},
-        app_header_key="aik_app_inline_key",
-        run_id="run_inline_1",
-        idempotency_key="run-inline-1",
-    )
-    status = client.run_status(run_id="run_inline_1", app_header_key="aik_app_inline_key")
-
-    assert submit["ok"] is True
-    assert status["ok"] is True
-    assert "submit_async_run" in fake_http.calls
-    assert "get_async_run_status" in fake_http.calls
-
-
-def test_logs_accept_explicit_runtime_key(tmp_path):
-    client = core.AraClient(
-        manifest=_manifest_with_runtime(runtime_profile={}),
-        api_base_url="https://api.ara.so",
-        api_key="token",
-        cwd=tmp_path,
-    )
-
-    class _ExistingHttp(_FakeHttp):
-        def __init__(self):
-            super().__init__()
-            self.stream_call: dict | None = None
-
-        def list_apps(self) -> dict:
-            self.calls.append("list_apps")
-            return {"apps": [{"id": "app_existing_1", "slug": "test-app", "role": "owner"}]}
-
-        def stream_logs(
-            self,
-            app_id: str,
-            *,
-            runtime_key: str | None = None,
-            app_header_key: str | None = None,
-        ):
-            self.stream_call = {
-                "app_id": app_id,
-                "runtime_key": runtime_key,
-                "app_header_key": app_header_key,
-            }
-            yield from super().stream_logs(
-                app_id,
-                runtime_key=runtime_key,
-                app_header_key=app_header_key,
-            )
-
-    fake_http = _ExistingHttp()
-    client.http = fake_http
-
-    rows = list(client.logs(runtime_key="ak_app_inline"))
-    assert rows
-    assert fake_http.stream_call is not None
-    assert fake_http.stream_call["app_id"] == "app_existing_1"
-    assert fake_http.stream_call["runtime_key"] == "ak_app_inline"
-    assert fake_http.stream_call["app_header_key"] == ""
-
-
-def test_cli_up_alias_dispatches_to_deploy(monkeypatch, capsys):
-    class _StubClient:
-        def __init__(self):
-            self.kwargs: dict | None = None
-
-        def deploy(self, **kwargs):
-            self.kwargs = kwargs
-            return {
-                "app_id": "app_test_1",
-                "slug": "test-app",
-                "runtime_key_created": True,
-                "runtime_key": "ak-secret",
-                "warmup": {"runtime_key": "ak-secret", "run_id": "run_warm_1"},
-                "secrets": {
-                    "synced": ["provider-local"],
-                    "referenced_only": ["provider-shared"],
-                    "values": {"OPENAI_API_KEY": "sk-local"},
-                },
-            }
-
-    stub = _StubClient()
-
-    monkeypatch.setattr(
-        core.AraClient,
-        "from_env",
-        classmethod(lambda cls, *, manifest, cwd=None: stub),
-    )
-
-    core._run_app_cli(
-        _manifest_with_runtime(runtime_profile={}),
-        argv=["up", "--warm", "true"],
-    )
-
-    assert stub.kwargs is not None
-    assert stub.kwargs["warm"] is True
-    assert stub.kwargs["on_existing"] == "update"
-    cli_out = capsys.readouterr().out
-    assert '"ok": true' in cli_out.lower()
-    assert '"slug": "test-app"' in cli_out.lower()
-    assert '"runtime_key_created": true' in cli_out.lower()
-    assert '"warmup_run_id": "run_warm_1"' in cli_out
-    assert '"setup_auth_command": "ara setup-auth app.py"' in cli_out
-    assert "OPENAI_API_KEY" not in cli_out
-    assert "sk-local" not in cli_out
-
-
-def test_cli_setup_auth_dispatches_to_client(monkeypatch, capsys):
-    class _StubClient:
-        def setup_auth(self, **kwargs):
-            assert kwargs["x_key_name"] == "demo-x"
-            assert kwargs["x_key_rpm"] == 55
-            assert kwargs["ensure_runtime_key"] is True
-            return {"ok": True, "app_id": "app_test_1", "app_header_key_present": True}
-
-    stub = _StubClient()
-    monkeypatch.setattr(
-        core.AraClient,
-        "from_env",
-        classmethod(lambda cls, *, manifest, cwd=None: stub),
-    )
-    core._run_app_cli(
-        _manifest_with_runtime(runtime_profile={}),
-        argv=["setup-auth", "--x-key-name", "demo-x", "--x-key-rpm", "55", "--ensure-runtime-key", "true"],
-    )
-    out = capsys.readouterr().out
-    assert '"ok": true' in out.lower()
-    assert '"app_id": "app_test_1"' in out
-
-
-def test_cli_rejects_unknown_subcommand(capsys):
-    with pytest.raises(SystemExit) as exc:
-        core._run_app_cli(_manifest_with_runtime(runtime_profile={}), argv=["not-a-command"])
-    assert exc.value.code == 2
-    err = capsys.readouterr().err
-    assert "invalid choice" in err
-
-
-def test_cli_logs_streams_runtime_lines(monkeypatch, capsys):
-    class _StubClient:
-        def logs(self, runtime_key=None, app_header_key=None):
-            _ = (runtime_key, app_header_key)
-            yield {
-                "timestamp": "2026-04-10T01:02:03Z",
-                "level": "info",
-                "run_id": "run_abc123",
-                "event_type": "run.started",
-                "message": "Run started",
-            }
-            yield {
-                "timestamp": "2026-04-10T01:02:04Z",
-                "level": "error",
-                "run_id": "run_abc123",
-                "event_type": "run.failed",
-                "message": "Tool failed",
-            }
-
-    stub = _StubClient()
-    monkeypatch.setattr(
-        core.AraClient,
-        "from_env",
-        classmethod(lambda cls, *, manifest, cwd=None: stub),
-    )
-
-    core._run_app_cli(
-        _manifest_with_runtime(runtime_profile={}),
-        argv=["logs"],
-    )
-    out = capsys.readouterr().out
-    assert "run=run_abc123 event=run.started" in out
-    assert "ERROR run=run_abc123 event=run.failed Tool failed" in out
-
-
-def test_adapter_helpers_shapes():
-    artifact = core.git_artifact("https://github.com/example/repo", ref="main", subdir="worker")
-    assert artifact == {
-        "type": "git",
-        "repo_url": "https://github.com/example/repo",
-        "ref": "main",
-        "subdir": "worker",
-    }
-
-    adapter = core.command_adapter(
-        "python3 worker.py",
-        framework="custom",
-        artifact=artifact,
-        env={"FOO": "bar"},
-    )
-    assert adapter["type"] == "command"
-    assert adapter["entrypoint"] == "python3 worker.py"
-    assert adapter["artifact"]["type"] == "git"
-    assert adapter["env"]["FOO"] == "bar"
-
-    assert core.langgraph_adapter()["framework"] == "langgraph"
-    assert core.langchain_adapter()["framework"] == "langchain"
-    assert core.agno_adapter()["framework"] == "agno"
-
-
-def test_event_envelope_generates_run_and_idempotency():
-    out = core.event_envelope("channel.web.inbound", message="hello")
-    event = out["event"]
-    assert event["type"] == "channel.web.inbound"
-    assert event["message"] == "hello"
-    assert event["metadata"]["run_id"]
-    assert event["metadata"]["idempotency_key"].startswith("channel-web-inbound-")
-
+    _load(script_one)
+    _load(script_two)
+    app = core._pop_minimal_app()
+    assert app is not None
+    manifest = app.manifest
+    assert manifest["slug"] == "second-automation"
+    tools = manifest["agent"]["tools"]
+    assert [tool["function"]["name"] for tool in tools] == ["tool_two"]

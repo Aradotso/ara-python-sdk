@@ -9,10 +9,6 @@ export default defineConfig({
           __dirname,
           "frontend/02-canonical-email-chat-cron/index.html",
         ),
-        labs11Frontend: resolve(
-          __dirname,
-          "frontend/08-11labs-frontend/index.html",
-        ),
       },
     },
   },

@@ -321,7 +321,7 @@ def test_resolve_control_plane_bearer_refreshes_expired_cli_jwt(monkeypatch, tmp
     assert payload["refresh_token"] == "refresh_2"
 
 
-def test_from_env_accepts_cli_jwt_credentials(monkeypatch, tmp_path):
+def test_from_env_accepts_cli_jwt_credentials_for_app_client(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     creds_dir = tmp_path / ".ara"
     creds_dir.mkdir(parents=True, exist_ok=True)
@@ -353,12 +353,8 @@ def test_from_env_accepts_cli_jwt_credentials(monkeypatch, tmp_path):
         "runtime_profile": {},
     }
     app_client = core.AraClient.from_env(manifest=manifest, cwd=str(tmp_path))
-    runtime_client = core.AraRuntimeClient.from_env(cwd=str(tmp_path))
-
     assert app_client.http.api_key == "jwt_access_1"
     assert app_client.http.base_url == "https://api.local.ara.so"
-    assert runtime_client.http.api_key == "jwt_access_1"
-    assert runtime_client.http.base_url == "https://api.local.ara.so"
 
 
 def test_auth_logout_removes_credentials(monkeypatch, tmp_path):

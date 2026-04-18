@@ -84,6 +84,11 @@ RESERVED_ENV_KEYS = frozenset({"SESSION_ID", "USER_ID", "APP_ID"})
 RESERVED_ENV_PREFIXES = ("ARA_", "MODAL_")
 logger = logging.getLogger(__name__)
 
+_MINIMAL_DEFAULT_PROJECT_NAME = "automation-app"
+_minimal_app_singleton: Optional["_AutomationApp"] = None
+_minimal_app_uses_default_name = False
+_minimal_app_owner_module = ""
+
 
 def _slugify(value: str) -> str:
     out = []
@@ -103,6 +108,19 @@ def _slugify(value: str) -> str:
 def _new_run_id() -> str:
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"run-{ts}-{uuid4().hex[:8]}"
+
+
+def _calling_module_name(*, depth: int = 2) -> str:
+    frame = inspect.currentframe()
+    try:
+        cursor = frame
+        steps = max(1, int(depth))
+        for _ in range(steps):
+            cursor = cursor.f_back if cursor is not None else None
+        module_name = cursor.f_globals.get("__name__") if cursor is not None else ""
+        return str(module_name or "").strip()
+    finally:
+        del frame
 
 
 def _env_flag_enabled(key: str) -> bool:
@@ -236,6 +254,12 @@ def _strip_leading_decorators(source: str) -> str:
 
 
 def _extract_callable_source(fn: Callable[..., Any], *, context: str) -> str:
+    source_override = getattr(fn, "__ara_source_override__", None)
+    if isinstance(source_override, str) and source_override.strip():
+        source = _strip_leading_decorators(source_override)
+        if not source.startswith("def "):
+            raise ValueError(f"{context} only supports standard def functions")
+        return source
     try:
         raw_source = inspect.getsource(fn)
     except (OSError, TypeError):
@@ -244,6 +268,41 @@ def _extract_callable_source(fn: Callable[..., Any], *, context: str) -> str:
     if not source.startswith("def "):
         raise ValueError(f"{context} only supports standard def functions")
     return source
+
+
+def _extract_secret_keys_from_source(source: str) -> list[str]:
+    try:
+        module = ast.parse(textwrap.dedent(str(source or "")))
+    except SyntaxError:
+        return []
+
+    out: list[str] = []
+    seen: set[str] = set()
+
+    class _Visitor(ast.NodeVisitor):
+        def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+            fn_name = ""
+            if isinstance(node.func, ast.Name):
+                fn_name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                fn_name = node.func.attr
+
+            if fn_name == "secret" and node.args:
+                first_arg = node.args[0]
+                if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
+                    candidate = first_arg.value.strip()
+                    if candidate:
+                        try:
+                            key = _validate_env_key(candidate)
+                        except ValueError:
+                            key = ""
+                        if key and key not in seen:
+                            seen.add(key)
+                            out.append(key)
+            self.generic_visit(node)
+
+    _Visitor().visit(module)
+    return out
 
 
 def _validate_agent_prompt_signature(fn: Callable[..., Any]) -> None:
@@ -1084,9 +1143,9 @@ def _bind_schedule_entries_to_target(
         run = raw.get("run") if isinstance(raw.get("run"), dict) else None
         if run is None:
             if target_kind == "agent":
-                run = invoke.agent(target_id)
+                run = _invoke_builder.agent(target_id)
             elif target_kind == "tool":
-                run = invoke.tool(target_id)
+                run = _invoke_builder.tool(target_id)
             else:
                 raise ValueError(f"Unsupported schedule target kind: {target_kind}")
         spec = _normalize_schedule_spec({**base, "run": run})
@@ -1139,7 +1198,7 @@ def _schedule_spec_to_automation_args(spec: Any) -> dict[str, Any]:
     return args
 
 
-class App:
+class _AutomationApp:
     """Public app declaration object."""
 
     def __init__(
@@ -1320,6 +1379,7 @@ class App:
         *,
         id: Optional[str] = None,
         parameters: Optional[dict[str, Any]] = None,
+        required_env: Optional[list[str]] = None,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
             tool_id = str(id or fn.__name__).strip()
@@ -1334,6 +1394,9 @@ class App:
                 raise ValueError("@app.tool only supports standard def functions")
             params_schema = dict(parameters) if isinstance(parameters, dict) else _callable_parameters_schema(fn)
             tool_description = str(fn.__doc__ or "").strip()
+            inferred_required_env = _extract_secret_keys_from_source(source)
+            explicit_required_env = _normalize_string_items(required_env)
+            merged_required_env = _normalize_string_items([*explicit_required_env, *inferred_required_env])
             item = {
                 "type": "function",
                 "function": {
@@ -1344,6 +1407,8 @@ class App:
                 "function_name": fn.__name__,
                 "source": source,
             }
+            if merged_required_env:
+                item["required_env"] = merged_required_env
             pending_schedule_entries = self._get_fn_schedule_entries(fn)
             if pending_schedule_entries:
                 item["schedules"] = _bind_schedule_entries_to_target(
@@ -1680,9 +1745,177 @@ class _Scheduler:
         }
 
 
-invoke = _Invoke()
-schedule = _Schedule()
-scheduler = _Scheduler()
+# Internal builder instances remain available for private helpers even though
+# the legacy public names are replaced with removed-API sentinels at module end.
+_invoke_builder = _Invoke()
+_schedule_builder = _Schedule()
+_scheduler_builder = _Scheduler()
+
+
+def _automation_project_name(automation_id: str) -> str:
+    slug = _slugify(automation_id)
+    if not slug:
+        slug = _MINIMAL_DEFAULT_PROJECT_NAME
+    return _normalize_project_name(slug[:63].rstrip("-"))
+
+
+def _ensure_minimal_app(project_name: Optional[str] = None, *, owner_module: str = "") -> _AutomationApp:
+    global _minimal_app_singleton, _minimal_app_uses_default_name, _minimal_app_owner_module
+    resolved_project_name = str(project_name or "").strip()
+    resolved_owner_module = str(owner_module or "").strip()
+    if (
+        _minimal_app_singleton is not None
+        and resolved_owner_module
+        and _minimal_app_owner_module
+        and _minimal_app_owner_module != resolved_owner_module
+    ):
+        # Avoid state leaking across multiple automation script imports in one process.
+        _minimal_app_singleton = None
+        _minimal_app_uses_default_name = False
+        _minimal_app_owner_module = ""
+    if _minimal_app_singleton is None:
+        if not resolved_project_name:
+            resolved_project_name = _MINIMAL_DEFAULT_PROJECT_NAME
+            _minimal_app_uses_default_name = True
+        else:
+            _minimal_app_uses_default_name = False
+        _minimal_app_singleton = _AutomationApp(resolved_project_name)
+        _minimal_app_owner_module = resolved_owner_module
+        return _minimal_app_singleton
+
+    if resolved_project_name and _minimal_app_uses_default_name and not _minimal_app_singleton._agents:
+        normalized = _normalize_project_name(resolved_project_name)
+        _minimal_app_singleton.project_name = normalized
+        _minimal_app_singleton.name = normalized
+        _minimal_app_singleton.slug = normalized
+        _minimal_app_uses_default_name = False
+    if resolved_owner_module and not _minimal_app_owner_module:
+        _minimal_app_owner_module = resolved_owner_module
+    return _minimal_app_singleton
+
+
+def _pop_minimal_app() -> Optional[_AutomationApp]:
+    global _minimal_app_singleton, _minimal_app_uses_default_name, _minimal_app_owner_module
+    app = _minimal_app_singleton
+    _minimal_app_singleton = None
+    _minimal_app_uses_default_name = False
+    _minimal_app_owner_module = ""
+    return app
+
+
+def secret(name: str, default: Optional[str] = None) -> str:
+    key = _validate_env_key(name)
+    value = str(os.getenv(key) or "").strip()
+    if value:
+        return value
+    if default is not None:
+        return str(default)
+    raise RuntimeError(f"Missing required secret: {key}")
+
+
+def env(name: str, default: Optional[str] = None) -> str:
+    key = _validate_env_key(name)
+    value = os.getenv(key)
+    if value is None:
+        return "" if default is None else str(default)
+    return str(value)
+
+
+def tool(
+    fn: Optional[Callable[..., Any]] = None,
+    *,
+    id: Optional[str] = None,
+    parameters: Optional[dict[str, Any]] = None,
+    required_env: Optional[list[str]] = None,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]] | Callable[..., Any]:
+    app = _ensure_minimal_app(owner_module=_calling_module_name())
+
+    def decorator(inner_fn: Callable[..., Any]) -> Callable[..., Any]:
+        return app.tool(id=id, parameters=parameters, required_env=required_env)(inner_fn)
+
+    if fn is not None:
+        return decorator(fn)
+    return decorator
+
+
+class Automation:
+    def __init__(
+        self,
+        id: str,
+        *,
+        system_instructions: str = "",
+        tools: Optional[list[Callable[..., Any]]] = None,
+        required_env: Optional[list[str]] = None,
+        entrypoint: str = "",
+        execution: Optional[dict[str, Any]] = None,
+    ):
+        resolved_id = str(id or "").strip()
+        if not resolved_id:
+            raise ValueError("Automation(...) requires a non-empty id")
+        app = _ensure_minimal_app(
+            project_name=_automation_project_name(resolved_id),
+            owner_module=_calling_module_name(),
+        )
+
+        skill_names: list[str] = []
+        for fn in tools or []:
+            if not callable(fn):
+                raise ValueError("Automation(..., tools=[...]) expects callables")
+            if not hasattr(fn, "__ara_tool__"):
+                app.tool()(fn)
+            tool_row = getattr(fn, "__ara_tool__", None)
+            if isinstance(tool_row, dict):
+                fn_block = tool_row.get("function") if isinstance(tool_row.get("function"), dict) else {}
+                tool_name = str(fn_block.get("name") or fn.__name__).strip()
+                if tool_name:
+                    skill_names.append(tool_name)
+
+        instructions_text = str(system_instructions or "").strip()
+        if not instructions_text:
+            instructions_text = f"Run automation '{resolved_id}'."
+
+        required_keys = _normalize_string_items(required_env)
+        for fn in tools or []:
+            tool_row = getattr(fn, "__ara_tool__", None)
+            if isinstance(tool_row, dict):
+                required_keys.extend(
+                    _normalize_string_items(
+                        tool_row.get("required_env")
+                        if isinstance(tool_row.get("required_env"), list)
+                        else []
+                    )
+                )
+        required_keys = _normalize_string_items(required_keys)
+        if required_keys:
+            existing_required = app._runtime_profile.get("__required_env_keys")
+            existing = _normalize_string_items(existing_required if isinstance(existing_required, list) else [])
+            app._runtime_profile["__required_env_keys"] = _normalize_string_items([*existing, *required_keys])
+
+        if entrypoint:
+            startup = dict(app._runtime_profile.get("startup") or {})
+            startup["entrypoint"] = str(entrypoint).strip()
+            app._runtime_profile["startup"] = startup
+
+        if isinstance(execution, dict) and execution:
+            app._runtime_profile["execution"] = dict(execution)
+
+        def _automation_entry(input: dict) -> str:  # noqa: A002
+            return instructions_text
+
+        _automation_entry.__doc__ = instructions_text
+        setattr(
+            _automation_entry,
+            "__ara_source_override__",
+            f"def _automation_entry(input: dict) -> str:\n    return {instructions_text!r}",
+        )
+        app.agent(
+            id=resolved_id,
+            entrypoint=True,
+            skills=_normalize_string_items(skill_names),
+        )(_automation_entry)
+
+        self.id = resolved_id
+        self.app = app
 
 
 def _read_dotenv(path: pathlib.Path) -> None:
@@ -2218,12 +2451,21 @@ class _Http:
             auth_header = f"Bearer {runtime_key}"
         else:
             raise RuntimeError("run_app requires runtime_key or app_header_key")
+        run_timeout_seconds = 120
+        raw_timeout = str(os.getenv("ARA_RUN_TIMEOUT_SECONDS", "120") or "120").strip()
+        try:
+            run_timeout_seconds = int(raw_timeout)
+        except ValueError:
+            run_timeout_seconds = 120
+        if run_timeout_seconds < 30:
+            run_timeout_seconds = 30
         return self._request(
             f"/v1/apps/{app_id}/run",
             method="POST",
             headers=headers,
             body={"agent_id": agent_id, "workflow_id": agent_id, "warmup": bool(warmup), "input": input_payload},
             auth_header=auth_header,
+            timeout_seconds=run_timeout_seconds,
         )
 
     def send_event(
@@ -2476,6 +2718,7 @@ class AraClient:
     def from_env(cls, *, manifest: dict[str, Any], cwd: Optional[str] = None) -> "AraClient":
         base = pathlib.Path(cwd or os.getcwd())
         _read_dotenv(base / ".env")
+        _read_dotenv(base / ".env.local")
         api_base_url = _resolve_api_base_url(DEFAULT_API_BASE_URL).strip() or DEFAULT_API_BASE_URL
         os.environ["ARA_API_BASE_URL"] = api_base_url
         api_key = _resolve_control_plane_bearer()
@@ -2513,8 +2756,63 @@ class AraClient:
             return env_key
         return ""
 
-    def _extract_secret_sync_plan(self, runtime_profile: dict[str, Any]) -> list[SecretDefinition]:
-        return _collect_runtime_secret_definitions(runtime_profile)
+    def _manifest_required_env_keys(self, runtime_profile: dict[str, Any]) -> list[str]:
+        out: list[str] = []
+        out.extend(
+            _normalize_string_items(
+                runtime_profile.get("__required_env_keys")
+                if isinstance(runtime_profile.get("__required_env_keys"), list)
+                else []
+            )
+        )
+        agent_block = self.manifest.get("agent") if isinstance(self.manifest.get("agent"), dict) else {}
+        tools = agent_block.get("tools") if isinstance(agent_block.get("tools"), list) else []
+        for tool_row in tools:
+            if not isinstance(tool_row, dict):
+                continue
+            out.extend(
+                _normalize_string_items(
+                    tool_row.get("required_env") if isinstance(tool_row.get("required_env"), list) else []
+                )
+            )
+            source = str(tool_row.get("source") or "")
+            if source:
+                out.extend(_extract_secret_keys_from_source(source))
+        return _normalize_string_items(out)
+
+    def _build_env_secret_definition(self, keys: list[str]) -> Optional[SecretDefinition]:
+        resolved: dict[str, str] = {}
+        missing: list[str] = []
+        for key in _normalize_string_items(keys):
+            value = str(os.getenv(key) or "").strip()
+            if not value:
+                missing.append(key)
+                continue
+            resolved[key] = value
+        if missing:
+            raise RuntimeError(
+                "Missing required environment variables for deploy-time secret sync: "
+                + ", ".join(missing)
+            )
+        if not resolved:
+            return None
+        return SecretDefinition.from_dict(resolved)
+
+    def _extract_secret_sync_plan(self, runtime_profile: dict[str, Any]) -> tuple[list[SecretDefinition], dict[str, Any]]:
+        definitions = _collect_runtime_secret_definitions(runtime_profile)
+        extra_required_env = self._manifest_required_env_keys(runtime_profile)
+        env_definition = self._build_env_secret_definition(extra_required_env)
+        if env_definition is None:
+            return definitions, runtime_profile
+
+        definitions.append(env_definition)
+        refs = runtime_profile.get("secret_refs") if isinstance(runtime_profile.get("secret_refs"), list) else []
+        existing_refs = [dict(item) for item in refs if isinstance(item, dict)]
+        existing_names = {str(item.get("name") or "").strip().lower() for item in existing_refs}
+        if env_definition.name not in existing_names:
+            existing_refs.append(env_definition.ref())
+        runtime_profile["secret_refs"] = existing_refs
+        return definitions, runtime_profile
 
     def _sync_secret_definitions(
         self,
@@ -2590,9 +2888,11 @@ class AraClient:
             )
 
         runtime_profile = dict(self.manifest.get("runtime_profile") or {})
-        reconcile_runtime_secrets = "secret_refs" in runtime_profile
-        secret_definitions = self._extract_secret_sync_plan(runtime_profile)
+        had_secret_refs = "secret_refs" in runtime_profile
+        secret_definitions, runtime_profile = self._extract_secret_sync_plan(runtime_profile)
+        reconcile_runtime_secrets = had_secret_refs or ("secret_refs" in runtime_profile)
         runtime_profile.pop("__secret_definitions", None)
+        runtime_profile.pop("__required_env_keys", None)
 
         payload = {
             "name": self.manifest.get("name"),
@@ -2879,6 +3179,7 @@ class AraRuntimeClient:
     def from_env(cls, *, cwd: Optional[str] = None) -> "AraRuntimeClient":
         base = pathlib.Path(cwd or os.getcwd())
         _read_dotenv(base / ".env")
+        _read_dotenv(base / ".env.local")
         api_base_url = _resolve_api_base_url(DEFAULT_API_BASE_URL).strip() or DEFAULT_API_BASE_URL
         os.environ["ARA_API_BASE_URL"] = api_base_url
         api_key = _resolve_control_plane_bearer()
@@ -3692,11 +3993,10 @@ def run_runtime_cli(argv: Optional[list[str]] = None) -> None:
     automation_schedule.add_argument("--every-seconds", type=int, default=None)
     automation_schedule.add_argument("--cron", default="")
     p_automation_add.add_argument("--timezone", default="UTC")
-    p_automation_add.add_argument("--message", default="")
     p_automation_add.add_argument(
         "--payload-json",
         default="",
-        help="JSON object payload. Optional when --message is provided.",
+        help="JSON object payload.",
     )
     p_automation_add.add_argument("--deliver", action="store_true")
     p_automation_add.add_argument(
@@ -3715,7 +4015,6 @@ def run_runtime_cli(argv: Optional[list[str]] = None) -> None:
     p_automation_update = sub_automation.add_parser("update")
     p_automation_update.add_argument("--id", dest="job_id", required=True)
     p_automation_update.add_argument("--name", default=None)
-    p_automation_update.add_argument("--message", default=None)
     p_automation_update.add_argument("--payload-json", default="")
     p_automation_update.add_argument("--deliver", action="store_true")
     p_automation_update.add_argument("--enable", action="store_true")
@@ -3902,15 +4201,10 @@ def run_runtime_cli(argv: Optional[list[str]] = None) -> None:
 
     if args.scope == "automation" and args.command == "add":
         payload = _parse_json_object_arg(args.payload_json, flag_name="--payload-json")
-        message = str(args.message or "").strip()
-        if message:
-            payload.setdefault("kind", "agent_turn")
-            payload["message"] = message
-            payload.setdefault("deliver", bool(args.deliver))
-        elif args.deliver:
-            payload["deliver"] = True
         if not payload:
-            raise SystemExit("ara runtime: automation add requires --message or --payload-json")
+            raise SystemExit("ara runtime: automation add requires --payload-json")
+        if args.deliver:
+            payload["deliver"] = True
         schedule_kind = "every" if args.every_seconds is not None else "cron"
         print(
             json.dumps(
@@ -3935,12 +4229,6 @@ def run_runtime_cli(argv: Optional[list[str]] = None) -> None:
         payload: Optional[dict[str, Any]] = None
         if str(args.payload_json or "").strip():
             payload = _parse_json_object_arg(args.payload_json, flag_name="--payload-json")
-        message = args.message
-        if message is not None:
-            if payload is None:
-                payload = {}
-            payload.setdefault("kind", "agent_turn")
-            payload["message"] = str(message).strip()
         if args.deliver:
             if payload is None:
                 payload = {}
@@ -4302,8 +4590,8 @@ def run_auth_cli(argv: Optional[list[str]] = None) -> None:
     )
 
 
-def _run_app_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *, default_command: str = "deploy") -> None:
-    app_obj = app if isinstance(app, App) else None
+def _run_app_cli(app: _AutomationApp | dict[str, Any], argv: Optional[list[str]] = None, *, default_command: str = "deploy") -> None:
+    app_obj = app if isinstance(app, _AutomationApp) else None
     manifest = app_obj.manifest if app_obj is not None else dict(app)
 
     parser = argparse.ArgumentParser(description="Ara Python SDK CLI")
@@ -4322,57 +4610,14 @@ def _run_app_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *,
 
     p_run = sub.add_parser("run")
     p_run.add_argument("--agent", default="")
-    p_run.add_argument("--message", default="")
     p_run.add_argument("--input", action="append", default=[])
     p_run.add_argument("--input-json", default="")
     p_run.add_argument("--runtime-key", default="")
     p_run.add_argument("--app-header-key", default="")
 
-    p_events = sub.add_parser("events")
-    p_events.add_argument("--agent", default="")
-    p_events.add_argument("--event-type", default="webhook.message.received")
-    p_events.add_argument("--channel", default="webhook")
-    p_events.add_argument("--source", default="webhook")
-    p_events.add_argument("--message", default="")
-    p_events.add_argument("--input", action="append", default=[])
-    p_events.add_argument("--metadata", action="append", default=[])
-    p_events.add_argument("--idempotency-key", default="")
-    p_events.add_argument("--runtime-key", default="")
-    p_events.add_argument("--app-header-key", default="")
-
-    p_run_async = sub.add_parser("run-async")
-    p_run_async.add_argument("--agent", default="")
-    p_run_async.add_argument("--message", default="")
-    p_run_async.add_argument("--input", action="append", default=[])
-    p_run_async.add_argument("--input-json", default="")
-    p_run_async.add_argument("--response-mode", choices=["poll", "webhook"], default="poll")
-    p_run_async.add_argument("--callback-url", default="")
-    p_run_async.add_argument("--callback-secret", default="")
-    p_run_async.add_argument("--callback-event", action="append", default=[])
-    p_run_async.add_argument("--run-id", default="")
-    p_run_async.add_argument("--idempotency-key", default="")
-    p_run_async.add_argument("--runtime-key", default="")
-    p_run_async.add_argument("--app-header-key", default="")
-
-    p_run_status = sub.add_parser("run-status")
-    p_run_status.add_argument("--run-id", default="")
-    p_run_status.add_argument("--runtime-key", default="")
-    p_run_status.add_argument("--app-header-key", default="")
-
     p_logs = sub.add_parser("logs")
     p_logs.add_argument("--runtime-key", default="")
     p_logs.add_argument("--app-header-key", default="")
-
-    p_invite = sub.add_parser("invite")
-    p_invite.add_argument("--email", default="")
-    p_invite.add_argument("--role", default="viewer")
-    p_invite.add_argument("--expires-hours", type=int, default=24 * 7)
-
-    sub.add_parser("setup")
-    p_setup_auth = sub.add_parser("setup-auth")
-    p_setup_auth.add_argument("--x-key-name", default="")
-    p_setup_auth.add_argument("--x-key-rpm", type=int, default=30)
-    p_setup_auth.add_argument("--ensure-runtime-key", default="true")
 
     args = parser.parse_args(argv)
     command = args.command or default_command
@@ -4405,9 +4650,6 @@ def _run_app_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *,
                     "runtime_key_created": bool(deploy_out.get("runtime_key_created")),
                     "runtime_key": str(deploy_out.get("runtime_key") or ""),
                     "warmup_run_id": warmup_run_id,
-                    "next": {
-                        "setup_auth_command": "ara setup-auth app.py",
-                    },
                 },
                 indent=2,
             )
@@ -4416,8 +4658,6 @@ def _run_app_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *,
 
     if command == "run":
         payload = _parse_json_object_arg(args.input_json, flag_name="--input-json") if str(args.input_json).strip() else _parse_pairs(args.input)
-        if args.message:
-            payload["message"] = args.message
         run_id = str(payload.get("run_id") or "").strip() or _new_run_id()
         payload.setdefault("run_id", run_id)
         payload.setdefault("idempotency_key", f"{_slugify(args.agent or 'default-agent')}-{_slugify(run_id)}")
@@ -4434,77 +4674,6 @@ def _run_app_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *,
         )
         return
 
-    if command == "events":
-        payload = _parse_pairs(args.input)
-        metadata = _parse_pairs(args.metadata)
-        idem = str(args.idempotency_key or "").strip() or f"{_slugify(args.event_type)}-{_slugify(_new_run_id())}"
-        print(
-            json.dumps(
-                client.events(
-                    agent_id=args.agent or None,
-                    event_type=args.event_type,
-                    channel=args.channel,
-                    source=args.source,
-                    message=args.message,
-                    payload=payload,
-                    metadata=metadata,
-                    idempotency_key=idem,
-                    runtime_key=args.runtime_key or None,
-                    app_header_key=args.app_header_key or None,
-                ),
-                indent=2,
-            )
-        )
-        return
-
-    if command == "run-async":
-        payload = _parse_json_object_arg(args.input_json, flag_name="--input-json") if str(args.input_json).strip() else _parse_pairs(args.input)
-        if args.message:
-            payload["message"] = args.message
-        run_id = str(args.run_id or "").strip() or _new_run_id()
-        idem = str(args.idempotency_key or "").strip() or f"run-{_slugify(run_id)}"
-        callback = None
-        if args.response_mode == "webhook":
-            if not str(args.callback_url or "").strip():
-                raise RuntimeError("run-async with --response-mode webhook requires --callback-url")
-            callback = {
-                "url": args.callback_url,
-                "secret": args.callback_secret or "",
-                "events": args.callback_event or ["run.completed", "run.failed"],
-            }
-        print(
-            json.dumps(
-                client.run_async(
-                    agent_id=args.agent or None,
-                    input_payload=payload,
-                    response_mode=args.response_mode,
-                    callback=callback,
-                    run_id=run_id,
-                    idempotency_key=idem,
-                    runtime_key=args.runtime_key or None,
-                    app_header_key=args.app_header_key or None,
-                ),
-                indent=2,
-            )
-        )
-        return
-
-    if command == "run-status":
-        rid = str(args.run_id or "").strip()
-        if not rid:
-            raise RuntimeError("run-status requires --run-id")
-        print(
-            json.dumps(
-                client.run_status(
-                    run_id=rid,
-                    runtime_key=args.runtime_key or None,
-                    app_header_key=args.app_header_key or None,
-                ),
-                indent=2,
-            )
-        )
-        return
-
     if command == "logs":
         try:
             for row in client.logs(runtime_key=args.runtime_key or None, app_header_key=args.app_header_key or None):
@@ -4513,28 +4682,48 @@ def _run_app_cli(app: App | dict[str, Any], argv: Optional[list[str]] = None, *,
             return
         return
 
-    if command == "invite":
-        email = str(args.email or "").strip()
-        if not email:
-            raise RuntimeError("invite requires --email")
-        print(json.dumps(client.invite(email=email, role=args.role, expires_in_hours=args.expires_hours), indent=2))
-        return
-
-    if command == "setup":
-        print(json.dumps(client.setup(), indent=2))
-        return
-
-    if command == "setup-auth":
-        print(
-            json.dumps(
-                client.setup_auth(
-                    x_key_name=args.x_key_name or None,
-                    x_key_rpm=int(args.x_key_rpm),
-                    ensure_runtime_key=str(args.ensure_runtime_key).lower() != "false",
-                ),
-                indent=2,
-            )
-        )
-        return
-
     parser.print_help()
+
+
+def _legacy_api_removed(name: str) -> RuntimeError:
+    return RuntimeError(
+        f"{name} is no longer supported in the minimal Ara SDK surface. "
+        "Use ara.Automation(...), @ara.tool, ara.secret(...), and ara.env(...)."
+    )
+
+
+class _RemovedLegacyAPI:
+    def __init__(self, name: str):
+        self._name = name
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        _ = args, kwargs
+        raise _legacy_api_removed(self._name)
+
+    def __getattr__(self, item: str) -> Any:
+        _ = item
+        raise _legacy_api_removed(self._name)
+
+    def __repr__(self) -> str:
+        return f"<removed legacy API {self._name}>"
+
+
+def App(*args: Any, **kwargs: Any) -> Any:
+    _ = args, kwargs
+    raise _legacy_api_removed("App(...)")
+
+
+Secret = _RemovedLegacyAPI("Secret")
+fastapi_endpoint = _RemovedLegacyAPI("fastapi_endpoint(...)")
+invoke = _RemovedLegacyAPI("invoke")
+schedule = _RemovedLegacyAPI("schedule")
+scheduler = _RemovedLegacyAPI("scheduler")
+runtime = _RemovedLegacyAPI("runtime(...)")
+sandbox = _RemovedLegacyAPI("sandbox(...)")
+entrypoint = _RemovedLegacyAPI("entrypoint(...)")
+file = _RemovedLegacyAPI("file(...)")
+local_file = _RemovedLegacyAPI("local_file(...)")
+AraRuntimeClient = _RemovedLegacyAPI("AraRuntimeClient")
+run_runtime_cli = _RemovedLegacyAPI("run_runtime_cli")
+run_connect_cli = _RemovedLegacyAPI("run_connect_cli")
+run_ssh_proxy_cli = _RemovedLegacyAPI("run_ssh_proxy_cli")
