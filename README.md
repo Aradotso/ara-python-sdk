@@ -6,110 +6,73 @@ The `ara-sdk` is the Python layer for defining those agents and tools in code us
 
 ## Overview
 
-Minimal SDK primitives:
-
-- `@tool`: expose deterministic Python functions as callable tools.
-- `secret("KEY")`: declare and read required secrets at runtime.
-- `connectors.<toolkit>[.<action>]`: scope Composio-backed connector access for an automation.
-- `Automation(...)`: define one deployable automation agent with tools and instructions.
-
-This keeps authoring simple: one script, one automation declaration, optional helper metadata.
+To program on Ara, you compose workflows with two primitives: `ara.Automation(...)` (system behavior) and `@ara.tool` (custom callable behavior attached to that automation).
 
 Runtime flow:
 
 ```text
-Users / Clients
-  (Web app, SMS, Slack, Email)
-            |
-            |  HTTP (bidirectional webhooks / responses)
-            v
-+----------------------------------------------+
-|         Ara Cloud: 24/7 Agent Runtime        |
-|  - Interprets prompt + workflow              |
-|  - Activates sandbox when work is needed     |
-+--------------------------+-------------------+
-                           |
-                           v
-                 +------------------------+
-                 |   Sandbox / Computer   |
-                 | - File system access   |
-                 | - Executes tasks/tools |
-                 +-----------+------------+
-                             |
-            +----------------+----------------+
-            v                                 v
- +---------------------------+   +---------------------------+
- | Custom tools / skill files|   | Subagents / other agents |
- +---------------------------+   +---------------------------+
+              +------------------------------+
+              | Messages (iMessage/SMS/RCS)  |
+              +------------------------------+
+                        ^
+                        |
+                        v
+              +----------------------------------------------+
+              |         Ara Cloud: 24/7 Agent Runtime        |
+              |  - Routes automation runs and tool calls     |
+              |  - Maintains runtime context and state       |
+              |                                              |
+              |  +------------------------+                  |
+              |  |   Sandbox / Computer   |                  |
+              |  | - File system access   |                  |
+              |  | - Executes tasks/tools |                  |
+              |  +------------------------+                  |
+              +-------------------+--------------------------+
+                                  ^
+                                  |
+        +-------------------------+-------------------------+
+        |                         |                         |
++------------------------+ +--------------------------+ +-----------------------------+
+|   Built-in tools       | |    Connector tools       | |   SDK custom tools          |
+| - File browse/edit     | | - Enabled in app.ara.so  | | - Python functions via      |
+| - Program execution    | | - External integrations  | |   @ara.tool                 |
++------------------------+ +--------------------------+ +-----------------------------+
 ```
 
 Quickstart:
-
-```python
-import ara_sdk as ara
-
-@ara.tool
-def send_email(to: str, subject: str, body: str) -> dict:
-    sender = ara.secret("CRON_EMAIL_FROM")
-    api_key = ara.secret("RESEND_API_KEY")
-    _ = (to, subject, body, api_key)
-    return {"ok": True, "from": sender}
-
-ara.Automation(
-    "weekday-priority-agent",
-    system_instructions="Send weekday priority digest.",
-    tools=[send_email],
-)
-```
-
-Connector tools are enabled by default. To disable connector access for an automation, pass `allow_connector_tools=False`.
-
-Scoped connector example:
-
-```python
-import ara_sdk as ara
-
-ara.Automation(
-    "calendar-reader",
-    system_instructions="Read and summarize upcoming calendar events.",
-    allow_connector_tools=False,
-    skills=[ara.connectors.google_calendar.list_events],
-)
-```
-
-Non-interactive auth (no `ara auth login`) is supported via `ARA_API_KEY`:
-
-```bash
-ARA_API_KEY="<your_key>" ara deploy app.py
-```
-
-For CI/CD, you can also use the helper script:
-
-```bash
-python scripts/deploy_app.py app.py --api-key "<your_key>"
-```
-
-## Install
 
 ```bash
 pip install ara-sdk
 ```
 
-## Documentation
+```python
+import ara_sdk as ara
 
-- SDK overview: <https://docs.ara.so/sdk/overview>
-- SDK quickstart: <https://docs.ara.so/sdk/quickstart>
-- SDK reference: <https://docs.ara.so/sdk/reference>
-- Examples index: <https://docs.ara.so/examples/overview>
+@ara.tool
+def utc_now() -> dict:
+    from datetime import datetime, timezone
+    return {"utc_time": datetime.now(timezone.utc).isoformat()}
 
-## Local testing (no uv)
+ara.Automation(
+    "hello-hourly-agent",
+    system_instructions=(
+        "Reply with one short hello message and include UTC time. "
+        "If linq_send_message is available and a phone route is paired, "
+        "send the same message there once."
+    ),
+    tools=[utc_now],
+)
+```
+
+Connector tools are enabled by default. To disable connector access for an automation, pass `allow_connector_tools=False`.
+
+Non-interactive auth (no `ara auth login`) is supported via `ARA_API_KEY`:
 
 ```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e . pytest
-python -m pytest -q
+ARA_API_KEY="<your_key>" ara deploy app.py
+ara run app.py
 ```
+
 
 ## Run maintained examples
 
