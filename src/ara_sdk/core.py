@@ -27,7 +27,7 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, NoReturn, Optional
+from typing import Any, Callable, NoReturn, Optional, TextIO
 from uuid import uuid4
 
 DEFAULT_SUBAGENT_MAX_CONCURRENCY = 8
@@ -2103,26 +2103,40 @@ def _read_dotenv(path: pathlib.Path) -> None:
 
 
 def _local_runtime_keys_path(base: pathlib.Path) -> pathlib.Path:
+    # Legacy location (project-local). New writes go to ~/.ara for safer defaults.
     return base / CLI_RUNTIME_KEYS_FILENAME
 
 
+def _cli_runtime_keys_path() -> pathlib.Path:
+    return pathlib.Path.home() / CLI_CREDENTIALS_DIRNAME / CLI_RUNTIME_KEYS_FILENAME
+
+
 def _load_local_runtime_keys(base: pathlib.Path) -> dict[str, str]:
-    path = _local_runtime_keys_path(base)
-    if not path.exists():
-        return {}
-    try:
-        parsed = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        logger.debug("Failed to load runtime key cache file: %s", path, exc_info=True)
-        return {}
-    if not isinstance(parsed, dict):
-        return {}
+    def _parse_keys(path: pathlib.Path) -> dict[str, str]:
+        try:
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.debug("Failed to load runtime key cache file: %s", path, exc_info=True)
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        out: dict[str, str] = {}
+        for key, value in parsed.items():
+            resolved_key = str(key or "").strip()
+            resolved_value = str(value or "").strip()
+            if resolved_key and resolved_value:
+                out[resolved_key] = resolved_value
+        return out
+
+    home_path = _cli_runtime_keys_path()
+    legacy_path = _local_runtime_keys_path(base)
     out: dict[str, str] = {}
-    for key, value in parsed.items():
-        resolved_key = str(key or "").strip()
-        resolved_value = str(value or "").strip()
-        if resolved_key and resolved_value:
-            out[resolved_key] = resolved_value
+    if home_path.exists():
+        out.update(_parse_keys(home_path))
+    if legacy_path.exists():
+        # Keep backward compatibility for users with pre-migration project-local caches.
+        for key, value in _parse_keys(legacy_path).items():
+            out.setdefault(key, value)
     return out
 
 
@@ -2135,10 +2149,14 @@ def _save_local_runtime_key(base: pathlib.Path, *, slug: str, runtime_key: str) 
     resolved_key = str(runtime_key or "").strip()
     if not resolved_slug or not resolved_key:
         return
-    path = _local_runtime_keys_path(base)
+    path = _cli_runtime_keys_path()
     data = _load_local_runtime_keys(base)
     data[resolved_slug] = resolved_key
     path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        logger.debug("Failed to enforce 0700 on runtime key cache directory: %s", path.parent, exc_info=True)
     payload = json.dumps(data, indent=2) + "\n"
     tmp_path = path.parent / f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp"
     try:
@@ -2482,6 +2500,7 @@ def _collect_oauth_callback_via_polling(
                 or str(status_payload.get("error") or "").strip()
                 or "OAuth login failed."
             )
+            detail = _append_bad_oauth_state_hint(detail)
             raise RuntimeError(f"OAuth login failed: {detail}")
         if status == "expired":
             raise RuntimeError("OAuth login expired before completion.")
@@ -2502,6 +2521,24 @@ def _collect_oauth_callback_via_polling(
     raise RuntimeError(
         "No OAuth approval received before timeout. "
         "Retry `ara auth login` or use `ara auth login --api-key <ARA_API_KEY>`."
+    )
+
+
+def _append_bad_oauth_state_hint(detail: str) -> str:
+    text = str(detail or "").strip()
+    if not text:
+        return text
+    lower = text.lower()
+    if "bad_oauth_state" not in lower and "oauth state parameter is invalid" not in lower:
+        return text
+    # Keep error output readable if callers already appended this remediation.
+    if "use only the latest url" in lower or "complete only the newest url" in lower:
+        return text
+    return (
+        f"{text} "
+        "Hint: this login URL is stale or already consumed. "
+        "Re-run `ara auth login` and use only the latest URL. "
+        "If you are already authenticated, use `ara auth whoami` or `ara auth logout` first."
     )
 
 
@@ -2560,6 +2597,39 @@ def _resolve_control_plane_bearer() -> str:
     if saved_api_key:
         return saved_api_key
     return ""
+
+
+def _resolve_auth_source_label() -> str:
+    if os.getenv("ARA_API_KEY", "").strip() or os.getenv("ARA_ACCESS_TOKEN", "").strip():
+        return "env"
+    creds = _load_cli_credentials()
+    auth_type = str(creds.get("auth_type") or "").strip()
+    if auth_type:
+        return auth_type
+    if str(creds.get("api_key") or "").strip():
+        return "cli_api_key"
+    return "unknown"
+
+
+def _current_authenticated_identity(api_base_url: str) -> Optional[dict[str, Any]]:
+    try:
+        bearer = _resolve_control_plane_bearer()
+    except Exception:  # noqa: BLE001
+        return None
+    if not bearer:
+        return None
+    try:
+        payload = _Http(api_base_url, bearer).cli_whoami()
+    except Exception:  # noqa: BLE001
+        return None
+    user_payload = payload.get("user") if isinstance(payload.get("user"), dict) else {}
+    return {
+        "auth_source": _resolve_auth_source_label(),
+        "user": {
+            "id": str(user_payload.get("id") or ""),
+            "email": str(user_payload.get("email") or ""),
+        },
+    }
 
 
 class _Http:
@@ -2937,6 +3007,7 @@ class AraClient:
         self.manifest = dict(manifest)
         self.cwd = cwd
         self.http = _Http(api_base_url, api_key)
+        self._runtime_key_lock = threading.Lock()
 
     @classmethod
     def from_env(cls, *, manifest: dict[str, Any], cwd: Optional[str] = None) -> "AraClient":
@@ -2982,6 +3053,35 @@ class AraClient:
         if env_key:
             return env_key
         return ""
+
+    def _ensure_runtime_credentials(
+        self,
+        *,
+        app_id: str,
+        runtime_key: Optional[str] = None,
+        app_header_key: Optional[str] = None,
+    ) -> tuple[str, str]:
+        resolved_header_key = self._resolve_app_header_key(app_header_key)
+        if resolved_header_key:
+            return "", resolved_header_key
+
+        with self._runtime_key_lock:
+            resolved_runtime_key = self._resolve_runtime_key(runtime_key)
+            if resolved_runtime_key:
+                return resolved_runtime_key, ""
+
+            slug = str(self.manifest.get("slug") or "").strip() or "<unknown>"
+            logger.info("Provisioning runtime key for app slug '%s' (app_id=%s).", slug, str(app_id or "").strip())
+            key_out = self.http.create_key(
+                app_id,
+                name=f"{self.manifest.get('slug')}-py-local",
+                requests_per_minute=60,
+            )
+            created_runtime_key = str(key_out.get("key") or "").strip()
+            if not created_runtime_key:
+                raise RuntimeError("Failed to provision runtime key for this app.")
+            _save_local_runtime_key(self.cwd, slug=str(self.manifest.get("slug") or ""), runtime_key=created_runtime_key)
+            return created_runtime_key, ""
 
     def _manifest_required_env_keys(self, runtime_profile: dict[str, Any]) -> list[str]:
         out: list[str] = []
@@ -3196,10 +3296,11 @@ class AraClient:
         app = self._find_app_by_slug()
         if not app:
             raise RuntimeError(f"App '{self.manifest.get('slug')}' not found. Deploy first.")
-        resolved_header_key = self._resolve_app_header_key(app_header_key)
-        key = self._resolve_runtime_key(runtime_key) if not resolved_header_key else ""
-        if not resolved_header_key and not key:
-            raise RuntimeError("Missing runtime key. Set ARA_RUNTIME_KEY, ARA_APP_HEADER_KEY, or run deploy/setup-auth first.")
+        key, resolved_header_key = self._ensure_runtime_credentials(
+            app_id=str(app["id"]),
+            runtime_key=runtime_key,
+            app_header_key=app_header_key,
+        )
         return self.http.run_app(
             str(app["id"]),
             runtime_key=key,
@@ -3225,10 +3326,11 @@ class AraClient:
         app = self._find_app_by_slug()
         if not app:
             raise RuntimeError(f"App '{self.manifest.get('slug')}' not found. Deploy first.")
-        resolved_header_key = self._resolve_app_header_key(app_header_key)
-        key = self._resolve_runtime_key(runtime_key) if not resolved_header_key else ""
-        if not resolved_header_key and not key:
-            raise RuntimeError("Missing runtime key. Set ARA_RUNTIME_KEY, ARA_APP_HEADER_KEY, or run deploy/setup-auth first.")
+        key, resolved_header_key = self._ensure_runtime_credentials(
+            app_id=str(app["id"]),
+            runtime_key=runtime_key,
+            app_header_key=app_header_key,
+        )
         return self.http.send_event(
             str(app["id"]),
             runtime_key=key,
@@ -3329,10 +3431,11 @@ class AraClient:
         app = self._find_app_by_slug()
         if not app:
             raise RuntimeError(f"App '{self.manifest.get('slug')}' not found. Deploy first.")
-        resolved_header_key = self._resolve_app_header_key(app_header_key)
-        key = self._resolve_runtime_key(runtime_key) if not resolved_header_key else ""
-        if not resolved_header_key and not key:
-            raise RuntimeError("Missing runtime key. Set ARA_RUNTIME_KEY, ARA_APP_HEADER_KEY, or run deploy/setup-auth first.")
+        key, resolved_header_key = self._ensure_runtime_credentials(
+            app_id=str(app["id"]),
+            runtime_key=runtime_key,
+            app_header_key=app_header_key,
+        )
         return self.http.submit_async_run(
             str(app["id"]),
             runtime_key=key,
@@ -3359,10 +3462,11 @@ class AraClient:
         rid = str(run_id or "").strip()
         if not rid:
             raise RuntimeError("run_status requires run_id")
-        resolved_header_key = self._resolve_app_header_key(app_header_key)
-        key = self._resolve_runtime_key(runtime_key) if not resolved_header_key else ""
-        if not resolved_header_key and not key:
-            raise RuntimeError("Missing runtime key. Set ARA_RUNTIME_KEY, ARA_APP_HEADER_KEY, or run deploy/setup-auth first.")
+        key, resolved_header_key = self._ensure_runtime_credentials(
+            app_id=str(app["id"]),
+            runtime_key=runtime_key,
+            app_header_key=app_header_key,
+        )
         return self.http.get_async_run_status(
             str(app["id"]),
             rid,
@@ -3379,10 +3483,11 @@ class AraClient:
         app = self._find_app_by_slug()
         if not app:
             raise RuntimeError(f"App '{self.manifest.get('slug')}' not found. Deploy first.")
-        resolved_header_key = self._resolve_app_header_key(app_header_key)
-        key = self._resolve_runtime_key(runtime_key) if not resolved_header_key else ""
-        if not resolved_header_key and not key:
-            raise RuntimeError("Missing runtime key. Set ARA_RUNTIME_KEY, ARA_APP_HEADER_KEY, or run deploy/setup-auth first.")
+        key, resolved_header_key = self._ensure_runtime_credentials(
+            app_id=str(app["id"]),
+            runtime_key=runtime_key,
+            app_header_key=app_header_key,
+        )
         for row in self.http.stream_logs(
             str(app["id"]),
             runtime_key=key,
@@ -4191,6 +4296,75 @@ def _format_runtime_log_line(row: dict[str, Any]) -> str:
     return f"{base} {message}".strip()
 
 
+def _resolve_log_file_path(raw_path: Optional[str]) -> pathlib.Path | None:
+    path_text = str(raw_path or "").strip()
+    if not path_text:
+        return None
+    path = pathlib.Path(path_text).expanduser()
+    if not path.is_absolute():
+        path = pathlib.Path.cwd() / path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _emit_runtime_log_line(row: dict[str, Any], *, log_file: Optional[TextIO] = None) -> None:
+    line = _format_runtime_log_line(row)
+    print(line, flush=True)
+    if log_file is not None:
+        log_file.write(f"{line}\n")
+        log_file.flush()
+
+
+def _tail_runtime_logs(
+    client: "AraClient",
+    *,
+    runtime_key: Optional[str],
+    app_header_key: Optional[str],
+    log_file_path: Optional[str] = None,
+) -> None:
+    log_file_handle: Optional[TextIO] = None
+    path = _resolve_log_file_path(log_file_path)
+    try:
+        if path is not None:
+            log_file_handle = path.open("a", encoding="utf-8")
+        for row in client.logs(runtime_key=runtime_key, app_header_key=app_header_key):
+            _emit_runtime_log_line(row, log_file=log_file_handle)
+    finally:
+        if log_file_handle is not None:
+            log_file_handle.close()
+
+
+def _stream_logs_for_run_until_terminal_event(
+    client: "AraClient",
+    *,
+    run_id: str,
+    runtime_key: Optional[str],
+    app_header_key: Optional[str],
+    log_file_path: Optional[str],
+    done_event: threading.Event,
+    errors: list[str],
+) -> None:
+    log_file_handle: Optional[TextIO] = None
+    path = _resolve_log_file_path(log_file_path)
+    try:
+        if path is not None:
+            log_file_handle = path.open("a", encoding="utf-8")
+        for row in client.logs(runtime_key=runtime_key, app_header_key=app_header_key):
+            row_run_id = str(row.get("run_id") or "").strip()
+            if row_run_id != run_id:
+                continue
+            _emit_runtime_log_line(row, log_file=log_file_handle)
+            event_type = str(row.get("event_type") or "").strip()
+            if event_type in {"run.completed", "run.failed"}:
+                break
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"{type(exc).__name__}: {exc}")
+    finally:
+        if log_file_handle is not None:
+            log_file_handle.close()
+        done_event.set()
+
+
 def run_runtime_cli(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(description="Ara runtime CLI")
     sub = parser.add_subparsers(dest="scope", required=True)
@@ -4627,6 +4801,11 @@ def run_auth_cli(argv: Optional[list[str]] = None) -> None:
     p_login.add_argument("--timeout-seconds", type=int, default=180)
     p_login.add_argument("--no-browser", action="store_true")
     p_login.add_argument(
+        "--reauth",
+        action="store_true",
+        help="Force a fresh OAuth login even if CLI credentials already exist.",
+    )
+    p_login.add_argument(
         "--auth-flow",
         choices=["poll"],
         default="poll",
@@ -4685,13 +4864,7 @@ def run_auth_cli(argv: Optional[list[str]] = None) -> None:
         if not bearer:
             raise SystemExit("ara auth: not logged in. Run `ara auth login` or set ARA_API_KEY.")
         out = _Http(api_base_url, bearer).cli_whoami()
-        if os.getenv("ARA_API_KEY", "").strip() or os.getenv("ARA_ACCESS_TOKEN", "").strip():
-            source = "env"
-        else:
-            creds = _load_cli_credentials()
-            auth_type = str(creds.get("auth_type") or "").strip()
-            source = auth_type or ("cli_api_key" if str(creds.get("api_key") or "").strip() else "cli_jwt")
-        out["auth_source"] = source
+        out["auth_source"] = _resolve_auth_source_label()
         print(json.dumps(out, indent=2))
         return
 
@@ -4729,6 +4902,36 @@ def run_auth_cli(argv: Optional[list[str]] = None) -> None:
         )
         return
 
+    provider = str(args.provider or "google").strip().lower() or "google"
+    if provider not in _CLI_OAUTH_ALLOWED_PROVIDERS:
+        allowed = ", ".join(sorted(_CLI_OAUTH_ALLOWED_PROVIDERS))
+        raise SystemExit(f"ara auth: unsupported OAuth provider '{provider}'. Allowed providers: {allowed}.")
+
+    if not bool(getattr(args, "reauth", False)):
+        current = _current_authenticated_identity(api_base_url)
+        if current:
+            user_payload = current.get("user") if isinstance(current.get("user"), dict) else {}
+            user_email = str(user_payload.get("email") or "").strip()
+            user_id = str(user_payload.get("id") or "").strip()
+            identity = user_email or user_id or "<unknown user>"
+            print(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "status": "already_logged_in",
+                        "auth_source": current.get("auth_source"),
+                        "user": user_payload,
+                        "message": (
+                            f"Already logged in as {identity}. "
+                            "Run `ara auth logout` to switch accounts, "
+                            "or re-run with `ara auth login --reauth` to force a new OAuth flow."
+                        ),
+                    },
+                    indent=2,
+                )
+            )
+            return
+
     direct_supabase_url = str(args.supabase_url or "").strip()
     direct_supabase_anon = str(args.supabase_anon_key or "").strip()
     config_payload: dict[str, Any] = {}
@@ -4746,10 +4949,6 @@ def run_auth_cli(argv: Optional[list[str]] = None) -> None:
     if not (supabase_url and supabase_anon_key):
         raise SystemExit("ara auth: could not resolve Supabase auth config.")
 
-    provider = str(args.provider or "google").strip().lower() or "google"
-    if provider not in _CLI_OAUTH_ALLOWED_PROVIDERS:
-        allowed = ", ".join(sorted(_CLI_OAUTH_ALLOWED_PROVIDERS))
-        raise SystemExit(f"ara auth: unsupported OAuth provider '{provider}'. Allowed providers: {allowed}.")
     code_verifier = _pkce_code_verifier()
     code_challenge = _pkce_code_challenge(code_verifier)
     try:
@@ -4775,7 +4974,8 @@ def run_auth_cli(argv: Optional[list[str]] = None) -> None:
             },
         )
     except RuntimeError as exc:
-        raise SystemExit(f"ara auth: login failed ({exc})") from None
+        detail = _append_bad_oauth_state_hint(str(exc))
+        raise SystemExit(f"ara auth: login failed ({detail})") from None
 
     access_token = str(issued.get("access_token") or "").strip()
     refresh_token = str(issued.get("refresh_token") or "").strip()
@@ -4841,6 +5041,16 @@ def _run_app_cli(app: _AutomationApp | dict[str, Any], argv: Optional[list[str]]
     _deploy_parent.add_argument("--cron", default="")
     _deploy_parent.add_argument("--every-seconds", type=int, default=None)
     _deploy_parent.add_argument("--timezone", default="UTC")
+    _deploy_parent.add_argument(
+        "--log",
+        action="store_true",
+        help="Tail live runtime logs after deploy (useful for schedule/cron debugging).",
+    )
+    _deploy_parent.add_argument(
+        "--log-file",
+        default="",
+        help="Append tailed runtime logs to this file path.",
+    )
 
     sub.add_parser("deploy", parents=[_deploy_parent])
     sub.add_parser("up", parents=[_deploy_parent])
@@ -4848,10 +5058,39 @@ def _run_app_cli(app: _AutomationApp | dict[str, Any], argv: Optional[list[str]]
     p_run = sub.add_parser("run")
     p_run.add_argument("--runtime-key", default="")
     p_run.add_argument("--app-header-key", default="")
+    p_run.add_argument(
+        "--stream-logs",
+        dest="stream_logs",
+        action="store_true",
+        default=True,
+        help="Tail runtime logs for this run until run.completed/run.failed is observed (default: enabled).",
+    )
+    p_run.add_argument(
+        "--no-stream-logs",
+        dest="stream_logs",
+        action="store_false",
+        help="Disable live log tailing for ara run.",
+    )
+    p_run.add_argument(
+        "--stream-logs-timeout-seconds",
+        type=int,
+        default=45,
+        help="Best-effort max seconds to wait for terminal run log when --stream-logs is set.",
+    )
+    p_run.add_argument(
+        "--log-file",
+        default="",
+        help="Append streamed run logs to this file path.",
+    )
 
     p_logs = sub.add_parser("logs")
     p_logs.add_argument("--runtime-key", default="")
     p_logs.add_argument("--app-header-key", default="")
+    p_logs.add_argument(
+        "--log-file",
+        default="",
+        help="Append tailed logs to this file path.",
+    )
 
     args = parser.parse_args(argv)
     command = args.command or default_command
@@ -4943,6 +5182,17 @@ def _run_app_cli(app: _AutomationApp | dict[str, Any], argv: Optional[list[str]]
                 indent=2,
             )
         )
+        should_tail_logs = bool(args.log) or bool(str(args.log_file or "").strip())
+        if should_tail_logs:
+            try:
+                _tail_runtime_logs(
+                    client,
+                    runtime_key=None,
+                    app_header_key=None,
+                    log_file_path=args.log_file or None,
+                )
+            except KeyboardInterrupt:
+                return
         return
 
     client = AraClient.from_env(manifest=manifest, cwd=os.getcwd())
@@ -4950,6 +5200,26 @@ def _run_app_cli(app: _AutomationApp | dict[str, Any], argv: Optional[list[str]]
     if command == "run":
         run_id = _new_run_id()
         payload = {"run_id": run_id, "idempotency_key": f"automation-{_slugify(run_id)}"}
+        stream_done = None
+        stream_errors: list[str] = []
+        if bool(args.stream_logs):
+            stream_done = threading.Event()
+            stream_thread = threading.Thread(
+                target=_stream_logs_for_run_until_terminal_event,
+                kwargs={
+                    "client": client,
+                    "run_id": run_id,
+                    "runtime_key": args.runtime_key or None,
+                    "app_header_key": args.app_header_key or None,
+                    "log_file_path": args.log_file or None,
+                    "done_event": stream_done,
+                    "errors": stream_errors,
+                },
+                daemon=True,
+            )
+            stream_thread.start()
+            # Best-effort head start for the stream. Slow networks may still miss early events.
+            time.sleep(0.2)
         print(
             json.dumps(
                 client.run(
@@ -4961,12 +5231,32 @@ def _run_app_cli(app: _AutomationApp | dict[str, Any], argv: Optional[list[str]]
                 indent=2,
             )
         )
+        if stream_done is not None:
+            timeout_seconds = max(1, int(args.stream_logs_timeout_seconds or 45))
+            if not stream_done.wait(timeout=timeout_seconds):
+                print(
+                    f"Warning: timed out waiting for terminal logs for run_id={run_id}. "
+                    "Try a larger --stream-logs-timeout-seconds.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            if stream_errors:
+                details = "; ".join(stream_errors)
+                print(
+                    f"Warning: log stream error(s) for run_id={run_id}: {details}",
+                    file=sys.stderr,
+                    flush=True,
+                )
         return
 
     if command == "logs":
         try:
-            for row in client.logs(runtime_key=args.runtime_key or None, app_header_key=args.app_header_key or None):
-                print(_format_runtime_log_line(row), flush=True)
+            _tail_runtime_logs(
+                client,
+                runtime_key=args.runtime_key or None,
+                app_header_key=args.app_header_key or None,
+                log_file_path=args.log_file or None,
+            )
         except KeyboardInterrupt:
             return
         return

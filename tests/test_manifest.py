@@ -1,7 +1,11 @@
 import importlib.util
 import io
+import json
 import stat
+import threading
+import time
 import urllib.error
+from typing import Any
 
 import pytest
 
@@ -140,7 +144,8 @@ def test_from_env_uses_api_key(monkeypatch, tmp_path):
     assert client.http.api_key == "ara_api_key_primary_0123456789abcdef"
 
 
-def test_runtime_key_resolves_from_local_cache(tmp_path):
+def test_runtime_key_resolves_from_cache_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
     client = core.AraClient(
         manifest=_manifest_with_runtime(runtime_profile={}),
         api_base_url="https://api.ara.so",
@@ -152,9 +157,26 @@ def test_runtime_key_resolves_from_local_cache(tmp_path):
     assert client._resolve_runtime_key() == "ak_app_cached_local"
 
 
-def test_runtime_key_cache_written_with_secure_permissions(tmp_path):
+def test_runtime_key_resolves_from_legacy_project_cache_when_home_cache_missing(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path / "other-home"))
+    client = core.AraClient(
+        manifest=_manifest_with_runtime(runtime_profile={}),
+        api_base_url="https://api.ara.so",
+        api_key="token",
+        cwd=tmp_path,
+    )
+    (tmp_path / core.CLI_RUNTIME_KEYS_FILENAME).write_text(
+        json.dumps({"test-app": "ak_app_legacy_123"}),
+        encoding="utf-8",
+    )
+
+    assert client._resolve_runtime_key() == "ak_app_legacy_123"
+
+
+def test_runtime_key_cache_written_with_secure_permissions(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
     core._save_local_runtime_key(tmp_path, slug="test-app", runtime_key="ak_app_secure")
-    path = tmp_path / core.CLI_RUNTIME_KEYS_FILENAME
+    path = tmp_path / ".ara" / core.CLI_RUNTIME_KEYS_FILENAME
     assert path.exists()
     mode = stat.S_IMODE(path.stat().st_mode)
     assert mode == 0o600
@@ -232,6 +254,205 @@ def test_app_cli_rejects_removed_legacy_commands():
             core._run_app_cli(manifest, argv=[command])
 
 
+def test_app_cli_run_stream_logs_follows_current_run(monkeypatch, capsys, tmp_path):
+    manifest = _manifest_with_runtime(runtime_profile={})
+    captured: dict[str, Any] = {}
+    fixed_run_id = "run_test_stream_123"
+    log_path = tmp_path / "run-stream.log"
+
+    class _FakeClient:
+        def run(self, *, agent_id, input_payload, runtime_key=None, app_header_key=None):
+            captured["agent_id"] = agent_id
+            captured["input_payload"] = dict(input_payload)
+            captured["runtime_key"] = runtime_key
+            captured["app_header_key"] = app_header_key
+            return {"ok": True, "run_id": fixed_run_id}
+
+        def logs(self, *, runtime_key=None, app_header_key=None):
+            _ = runtime_key, app_header_key
+            yield {
+                "timestamp": "2026-04-18T00:00:00Z",
+                "level": "info",
+                "run_id": "run_other",
+                "event_type": "run.started",
+                "message": "Other run started",
+            }
+            yield {
+                "timestamp": "2026-04-18T00:00:01Z",
+                "level": "info",
+                "run_id": fixed_run_id,
+                "event_type": "run.started",
+                "message": "Run started",
+            }
+            yield {
+                "timestamp": "2026-04-18T00:00:02Z",
+                "level": "info",
+                "run_id": fixed_run_id,
+                "event_type": "run.completed",
+                "message": "Run completed",
+            }
+
+    monkeypatch.setattr(core.AraClient, "from_env", classmethod(lambda cls, *, manifest, cwd=None: _FakeClient()))
+    monkeypatch.setattr(core, "_new_run_id", lambda: fixed_run_id)
+
+    core._run_app_cli(
+        manifest,
+        argv=[
+            "run",
+            "--runtime-key",
+            "ak_app_test",
+            "--log-file",
+            str(log_path),
+            "--stream-logs-timeout-seconds",
+            "1",
+        ],
+    )
+
+    output = capsys.readouterr().out
+    assert "run=run_test_stream_123 event=run.started Run started" in output
+    assert "run=run_test_stream_123 event=run.completed Run completed" in output
+    assert "run=run_other" not in output
+    assert '"ok": true' in output
+    assert captured["agent_id"] is None
+    assert captured["runtime_key"] == "ak_app_test"
+    assert captured["input_payload"]["run_id"] == fixed_run_id
+    assert "idempotency_key" in captured["input_payload"]
+    log_contents = log_path.read_text(encoding="utf-8")
+    assert "run=run_test_stream_123 event=run.started Run started" in log_contents
+    assert "run=run_test_stream_123 event=run.completed Run completed" in log_contents
+
+
+def test_app_cli_run_no_stream_logs_skips_log_tail(monkeypatch, capsys):
+    manifest = _manifest_with_runtime(runtime_profile={})
+
+    class _FakeClient:
+        def run(self, *, agent_id, input_payload, runtime_key=None, app_header_key=None):
+            _ = agent_id, input_payload, runtime_key, app_header_key
+            return {"ok": True, "run_id": "run_no_stream_1"}
+
+        def logs(self, *, runtime_key=None, app_header_key=None):
+            _ = runtime_key, app_header_key
+            raise AssertionError("logs() should not be called when --no-stream-logs is set")
+
+    monkeypatch.setattr(core.AraClient, "from_env", classmethod(lambda cls, *, manifest, cwd=None: _FakeClient()))
+
+    core._run_app_cli(
+        manifest,
+        argv=[
+            "run",
+            "--runtime-key",
+            "ak_app_test",
+            "--no-stream-logs",
+        ],
+    )
+
+    output = capsys.readouterr().out
+    assert '"ok": true' in output
+    assert "run=" not in output
+
+
+def test_run_auto_provisions_and_caches_runtime_key(monkeypatch, tmp_path):
+    manifest = _manifest_with_runtime(runtime_profile={})
+    calls: dict[str, Any] = {"create_key_count": 0}
+
+    class _FakeHttp:
+        def list_apps(self):
+            return {"apps": [{"id": "app_test_1", "slug": "test-app", "role": "owner"}]}
+
+        def create_key(self, app_id, *, name, requests_per_minute):
+            calls["create_key_count"] += 1
+            calls["create_key_app_id"] = app_id
+            calls["create_key_name"] = name
+            calls["create_key_rpm"] = requests_per_minute
+            return {"key": "ak_app_auto_123"}
+
+        def run_app(self, app_id, *, runtime_key=None, app_header_key=None, agent_id=None, input_payload=None, warmup=False):
+            calls["run_app"] = {
+                "app_id": app_id,
+                "runtime_key": runtime_key,
+                "app_header_key": app_header_key,
+                "agent_id": agent_id,
+                "input_payload": dict(input_payload or {}),
+                "warmup": warmup,
+            }
+            return {"ok": True, "run_id": "run_auto_1"}
+
+    monkeypatch.delenv("ARA_RUNTIME_KEY", raising=False)
+    monkeypatch.delenv("ARA_APP_HEADER_KEY", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    client = core.AraClient(
+        manifest=manifest,
+        api_base_url="https://api.ara.so",
+        api_key="token",
+        cwd=tmp_path,
+    )
+    client.http = _FakeHttp()
+
+    out_first = client.run(agent_id=None, input_payload={"trigger": "first"})
+    out_second = client.run(agent_id=None, input_payload={"trigger": "second"})
+
+    assert out_first["ok"] is True
+    assert out_second["ok"] is True
+    assert calls["create_key_count"] == 1
+    assert calls["run_app"]["runtime_key"] == "ak_app_auto_123"
+    assert calls["run_app"]["app_header_key"] == ""
+    runtime_key_cache = json.loads((tmp_path / ".ara" / ".runtime-keys.local").read_text(encoding="utf-8"))
+    assert runtime_key_cache["test-app"] == "ak_app_auto_123"
+
+
+def test_runtime_key_auto_provision_is_locked_across_concurrent_calls(monkeypatch, tmp_path):
+    manifest = _manifest_with_runtime(runtime_profile={})
+    monkeypatch.delenv("ARA_RUNTIME_KEY", raising=False)
+    monkeypatch.delenv("ARA_APP_HEADER_KEY", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    calls: dict[str, Any] = {"create_key_count": 0}
+    call_lock = threading.Lock()
+
+    class _FakeHttp:
+        def create_key(self, app_id, *, name, requests_per_minute):
+            _ = app_id, name, requests_per_minute
+            with call_lock:
+                calls["create_key_count"] += 1
+            time.sleep(0.05)
+            return {"key": "ak_app_auto_lock_123"}
+
+    client = core.AraClient(
+        manifest=manifest,
+        api_base_url="https://api.ara.so",
+        api_key="token",
+        cwd=tmp_path,
+    )
+    client.http = _FakeHttp()
+
+    barrier = threading.Barrier(2)
+    results: list[tuple[str, str]] = []
+    errors: list[Exception] = []
+
+    def _worker():
+        try:
+            barrier.wait()
+            results.append(client._ensure_runtime_credentials(app_id="app_test_1"))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    t1 = threading.Thread(target=_worker)
+    t2 = threading.Thread(target=_worker)
+    t1.start()
+    t2.start()
+    t1.join(timeout=2)
+    t2.join(timeout=2)
+
+    assert not errors
+    assert len(results) == 2
+    assert calls["create_key_count"] == 1
+    assert results[0][0] == "ak_app_auto_lock_123"
+    assert results[1][0] == "ak_app_auto_lock_123"
+    runtime_key_cache = json.loads((tmp_path / ".ara" / ".runtime-keys.local").read_text(encoding="utf-8"))
+    assert runtime_key_cache["test-app"] == "ak_app_auto_lock_123"
+
+
 def test_deploy_cli_attaches_cron_schedule_to_entrypoint_agent(monkeypatch, tmp_path):
     manifest = _manifest_with_runtime(runtime_profile={})
     manifest["agent"] = {
@@ -280,6 +501,57 @@ def test_deploy_cli_rejects_mixed_cron_and_every_flags():
             manifest,
             argv=["deploy", "--cron", "*/5 * * * *", "--every-seconds", "300"],
         )
+
+
+def test_deploy_cli_log_flag_tails_logs_and_writes_file(monkeypatch, capsys, tmp_path):
+    manifest = _manifest_with_runtime(runtime_profile={})
+    captured: dict[str, Any] = {}
+    log_path = tmp_path / "deploy-tail.log"
+
+    class _FakeClient:
+        def deploy(self, **kwargs):
+            captured["deploy_kwargs"] = kwargs
+            return {"runtime_key_created": True, "runtime_key": "ak_app_deploy_test", "warmup": None}
+
+        def logs(self, *, runtime_key=None, app_header_key=None):
+            captured["logs_runtime_key"] = runtime_key
+            captured["logs_app_header_key"] = app_header_key
+            yield {
+                "timestamp": "2026-04-18T00:00:00Z",
+                "level": "info",
+                "run_id": "run_cron_1",
+                "event_type": "run.started",
+                "message": "Cron run started",
+            }
+            yield {
+                "timestamp": "2026-04-18T00:00:01Z",
+                "level": "info",
+                "run_id": "run_cron_1",
+                "event_type": "run.completed",
+                "message": "Cron run completed",
+            }
+
+    monkeypatch.setattr(core.AraClient, "from_env", classmethod(lambda cls, *, manifest, cwd=None: _FakeClient()))
+
+    core._run_app_cli(
+        manifest,
+        argv=[
+            "deploy",
+            "--log",
+            "--log-file",
+            str(log_path),
+        ],
+    )
+
+    output = capsys.readouterr().out
+    assert '"ok": true' in output
+    assert "run=run_cron_1 event=run.started Cron run started" in output
+    assert "run=run_cron_1 event=run.completed Cron run completed" in output
+    assert captured["logs_runtime_key"] is None
+    assert captured["logs_app_header_key"] is None
+    log_contents = log_path.read_text(encoding="utf-8")
+    assert "run=run_cron_1 event=run.started Cron run started" in log_contents
+    assert "run=run_cron_1 event=run.completed Cron run completed" in log_contents
 
 
 def test_top_level_module_does_not_expose_legacy_symbols():
