@@ -10,6 +10,7 @@ Minimal SDK primitives:
 
 - `@tool`: expose deterministic Python functions as callable tools.
 - `secret("KEY")`: declare and read required secrets at runtime.
+- `connectors.<toolkit>[.<action>]`: scope Composio-backed connector access for an automation.
 - `Automation(...)`: define one deployable automation agent with tools and instructions.
 
 This keeps authoring simple: one script, one automation declaration, optional helper metadata.
@@ -61,6 +62,21 @@ ara.Automation(
 )
 ```
 
+Connector tools are enabled by default. To disable connector access for an automation, pass `allow_connector_tools=False`.
+
+Scoped connector example:
+
+```python
+import ara_sdk as ara
+
+ara.Automation(
+    "calendar-reader",
+    system_instructions="Read and summarize upcoming calendar events.",
+    allow_connector_tools=False,
+    skills=[ara.connectors.google_calendar.list_events],
+)
+```
+
 Non-interactive auth (no `ara auth login`) is supported via `ARA_API_KEY`:
 
 ```bash
@@ -109,6 +125,12 @@ Not inherently. The runtime is always available as the service boundary, but san
 
 ### How should I think about `Automation`, `@tool`, and `secret(...)`?
 Use `Automation(...)` as the top-level app declaration, `@tool` for deterministic capability execution, and `secret("KEY")` when a tool requires credentials. Schedules are configured in app.ara.so UI to avoid code/UI drift.
+
+### How do connectors work in `Automation(...)`?
+Connector tools are enabled by default (`allow_connector_tools=True`). Set `allow_connector_tools=False` for strict mode, then explicitly scope allowed connector actions with `skills=[ara.connectors.<toolkit>[.<action>]]`.
+
+### Do tools have to return a `dict`?
+No. Tool functions can return any JSON-serializable value (`dict`, `list`, `str`, `int`, `float`, `bool`, or `None`). The runtime serializes structured values to JSON and provides tool output back to the model as text.
 
 ### How do I handle secrets and environment safely at scale?
 Declare required credentials in code with `secret("KEY")` and provide values through Ara secret sync at deploy time (or pre-provisioned app secrets). Keep all secret values out of source control.

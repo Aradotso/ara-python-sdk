@@ -13,4 +13,5 @@ build/
 .env
 .env.local
 .runtime-key.local
+.runtime-keys.local
 .app-header-key.local

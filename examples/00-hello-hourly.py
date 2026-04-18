@@ -3,7 +3,7 @@ import ara_sdk as ara
 # HOW TO RUN (minimal):
 # 1) ara auth login
 # 2) ara deploy examples/00-hello-hourly.py
-# 3) ara run examples/00-hello-hourly.py --agent hello-hourly-agent --input-json '{"trigger":"manual"}'
+# 3) ara run examples/00-hello-hourly.py
 # 4) In app.ara.so, set schedule cron to: 0 * * * * (every hour) and enable it.
 
 @ara.tool

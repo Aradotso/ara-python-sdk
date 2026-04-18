@@ -4,7 +4,7 @@ import ara_sdk as ara
 # 1) export CRON_EMAIL_FROM="alerts@yourdomain.com"
 # 2) ara auth login
 # 3) ara deploy examples/04-env-and-secrets.py
-# 4) ara run examples/04-env-and-secrets.py --agent env-secrets-agent --input-json '{"trigger":"manual"}'
+# 4) ara run examples/04-env-and-secrets.py
 #
 # Notes:
 # - ara.env("KEY", default="...") is optional config.

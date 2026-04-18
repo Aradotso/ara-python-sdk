@@ -38,6 +38,7 @@ DEBUG_HTTP_ERRORS_ENV = "ARA_SDK_DEBUG_HTTP_ERRORS"
 DEFAULT_API_BASE_URL = "https://api.ara.so"
 CLI_CREDENTIALS_FILENAME = "credentials.json"
 CLI_CREDENTIALS_DIRNAME = ".ara"
+CLI_RUNTIME_KEYS_FILENAME = ".runtime-keys.local"
 CLI_SSH_DIRNAME = "ssh"
 CLI_SSH_ALIAS = "ara-personal"
 CLI_SSH_KEY_BASENAME = "ara_personal_ed25519"
@@ -940,6 +941,163 @@ def _normalize_string_items(raw: Optional[list[str]]) -> list[str]:
     return out
 
 
+def _normalize_connector_toolkit_slug(value: str) -> str:
+    lowered = str(value or "").strip().lower()
+    slug = "".join(ch for ch in lowered if ch.isalnum())
+    if not slug:
+        raise ValueError("Connector toolkit must contain letters or digits")
+    return slug
+
+
+def _normalize_connector_action_name(value: str) -> str:
+    lowered = str(value or "").strip().lower()
+    action = re.sub(r"[^a-z0-9]+", "_", lowered).strip("_")
+    if not action:
+        raise ValueError("Connector action must contain letters or digits")
+    return action
+
+
+class _ConnectorSkillRef:
+    __slots__ = ("toolkit", "action")
+
+    def __init__(self, toolkit: str, action: str = ""):
+        self.toolkit = _normalize_connector_toolkit_slug(toolkit)
+        self.action = _normalize_connector_action_name(action) if action else ""
+
+    def __getattr__(self, name: str) -> "_ConnectorSkillRef":
+        if name.startswith("_"):
+            raise AttributeError(name)
+        if self.action:
+            raise AttributeError("Connector action already selected")
+        return _ConnectorSkillRef(self.toolkit, _normalize_connector_action_name(name))
+
+    def as_token(self) -> str:
+        if self.action:
+            return f"connector:{self.toolkit}:{self.action}"
+        return f"connector:{self.toolkit}"
+
+    def __str__(self) -> str:
+        return self.as_token()
+
+    def __repr__(self) -> str:
+        if self.action:
+            return f"<ara.connectors.{self.toolkit}.{self.action}>"
+        return f"<ara.connectors.{self.toolkit}>"
+
+
+class _ConnectorsNamespace:
+    def __getattr__(self, name: str) -> _ConnectorSkillRef:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return _ConnectorSkillRef(_normalize_connector_toolkit_slug(name))
+
+
+connectors = _ConnectorsNamespace()
+
+
+def _parse_connector_skill_token(token: str) -> Optional[tuple[str, str]]:
+    text = str(token or "").strip()
+    if not text:
+        return None
+    for prefix in ("connector:", "composio:"):
+        if not text.startswith(prefix):
+            continue
+        remainder = text[len(prefix) :]
+        toolkit_raw, _, action_raw = remainder.partition(":")
+        toolkit = _normalize_connector_toolkit_slug(toolkit_raw)
+        action = _normalize_connector_action_name(action_raw) if action_raw else ""
+        return toolkit, action
+    return None
+
+
+def _normalize_automation_skill_items(raw: Optional[list[Any]]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw or []:
+        if isinstance(item, _ConnectorSkillRef):
+            value = item.as_token()
+        else:
+            value = str(item or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _connector_refs_from_skill_items(skills: list[str]) -> list[tuple[str, str]]:
+    refs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in skills:
+        parsed = _parse_connector_skill_token(item)
+        if not parsed:
+            continue
+        if parsed in seen:
+            continue
+        seen.add(parsed)
+        refs.append(parsed)
+    return refs
+
+
+def _merge_connector_tool_privileges(
+    existing: Any,
+    connector_refs: list[tuple[str, str]],
+) -> list[dict[str, Any]]:
+    action_map: dict[str, Optional[set[str]]] = {}
+    scopes_map: dict[str, list[str]] = {}
+
+    if isinstance(existing, list):
+        for row in existing:
+            if not isinstance(row, dict):
+                continue
+            toolkit_raw = str(row.get("toolkit") or row.get("slug") or "").strip()
+            if not toolkit_raw:
+                continue
+            toolkit = _normalize_connector_toolkit_slug(toolkit_raw)
+            allowed_actions_raw = row.get("allowed_actions")
+            if isinstance(allowed_actions_raw, list) and allowed_actions_raw:
+                allowed_actions: set[str] = set()
+                for action in allowed_actions_raw:
+                    try:
+                        allowed_actions.add(_normalize_connector_action_name(action))
+                    except ValueError:
+                        continue
+                if not allowed_actions:
+                    raise ValueError(
+                        "tool_privileges allowed_actions contained no valid connector action names"
+                    )
+                action_map[toolkit] = allowed_actions
+            else:
+                action_map[toolkit] = None
+            scopes_raw = row.get("scopes")
+            if isinstance(scopes_raw, list):
+                scopes_map[toolkit] = _normalize_string_items([str(scope or "").strip() for scope in scopes_raw])
+
+    for toolkit, action in connector_refs:
+        existing_actions = action_map.get(toolkit)
+        if not action:
+            action_map[toolkit] = None
+            continue
+        if existing_actions is None and toolkit in action_map:
+            continue
+        if existing_actions is None:
+            existing_actions = set()
+        existing_actions.add(action)
+        action_map[toolkit] = existing_actions
+
+    out: list[dict[str, Any]] = []
+    for toolkit in sorted(action_map.keys()):
+        actions = action_map[toolkit]
+        out.append(
+            {
+                "toolkit": toolkit,
+                "allowed_actions": sorted(actions) if isinstance(actions, set) else [],
+                "scopes": list(scopes_map.get(toolkit, [])),
+            }
+        )
+    return out
+
+
 def _normalize_schedule_run(run: Any) -> ScheduleRunSpec:
     if not isinstance(run, dict):
         raise ValueError("schedule run must be a dict")
@@ -1555,7 +1713,7 @@ class _AutomationApp:
                     {
                         "id": agent_id,
                         "workflow_id": agent_id,
-                        "channels": [],
+                        "channels": ["linq"],
                         "runtime": runtime_cfg,
                         "sandbox": dict(row.get("sandbox") or {"policy": "shared", "max_concurrency": DEFAULT_SUBAGENT_MAX_CONCURRENCY}),
                         "hooks": [],
@@ -1845,6 +2003,8 @@ class Automation:
         *,
         system_instructions: str = "",
         tools: Optional[list[Callable[..., Any]]] = None,
+        skills: Optional[list[Any]] = None,
+        allow_connector_tools: bool = True,
         required_env: Optional[list[str]] = None,
         entrypoint: str = "",
         execution: Optional[dict[str, Any]] = None,
@@ -1857,7 +2017,7 @@ class Automation:
             owner_module=_calling_module_name(),
         )
 
-        skill_names: list[str] = []
+        tool_skill_names: list[str] = []
         for fn in tools or []:
             if not callable(fn):
                 raise ValueError("Automation(..., tools=[...]) expects callables")
@@ -1868,7 +2028,17 @@ class Automation:
                 fn_block = tool_row.get("function") if isinstance(tool_row.get("function"), dict) else {}
                 tool_name = str(fn_block.get("name") or fn.__name__).strip()
                 if tool_name:
-                    skill_names.append(tool_name)
+                    tool_skill_names.append(tool_name)
+        explicit_skill_names = _normalize_automation_skill_items(skills)
+        connector_refs = _connector_refs_from_skill_items(explicit_skill_names)
+        skill_names = _normalize_string_items([*tool_skill_names, *explicit_skill_names])
+        app._interfaces["inherit_owner_tools"] = bool(allow_connector_tools)
+        if connector_refs:
+            app._interfaces["inherit_owner_tools"] = True
+            app._interfaces["tool_privileges"] = _merge_connector_tool_privileges(
+                app._interfaces.get("tool_privileges"),
+                connector_refs,
+            )
 
         instructions_text = str(system_instructions or "").strip()
         if not instructions_text:
@@ -1930,6 +2100,60 @@ def _read_dotenv(path: pathlib.Path) -> None:
         value = value.strip().strip("'").strip('"')
         if key and not os.getenv(key):
             os.environ[key] = value
+
+
+def _local_runtime_keys_path(base: pathlib.Path) -> pathlib.Path:
+    return base / CLI_RUNTIME_KEYS_FILENAME
+
+
+def _load_local_runtime_keys(base: pathlib.Path) -> dict[str, str]:
+    path = _local_runtime_keys_path(base)
+    if not path.exists():
+        return {}
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.debug("Failed to load runtime key cache file: %s", path, exc_info=True)
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, value in parsed.items():
+        resolved_key = str(key or "").strip()
+        resolved_value = str(value or "").strip()
+        if resolved_key and resolved_value:
+            out[resolved_key] = resolved_value
+    return out
+
+
+def _load_local_runtime_key(base: pathlib.Path, *, slug: str) -> str:
+    return str(_load_local_runtime_keys(base).get(slug, "") or "").strip()
+
+
+def _save_local_runtime_key(base: pathlib.Path, *, slug: str, runtime_key: str) -> None:
+    resolved_slug = str(slug or "").strip()
+    resolved_key = str(runtime_key or "").strip()
+    if not resolved_slug or not resolved_key:
+        return
+    path = _local_runtime_keys_path(base)
+    data = _load_local_runtime_keys(base)
+    data[resolved_slug] = resolved_key
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(data, indent=2) + "\n"
+    tmp_path = path.parent / f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+    try:
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                logger.debug("Failed to clean runtime key temp file: %s", tmp_path, exc_info=True)
 
 
 def _cli_credentials_path() -> pathlib.Path:
@@ -2438,8 +2662,8 @@ class _Http:
         *,
         runtime_key: Optional[str] = None,
         app_header_key: Optional[str] = None,
-        agent_id: Optional[str],
-        input_payload: dict[str, Any],
+        agent_id: Optional[str] = None,
+        input_payload: Optional[dict[str, Any]] = None,
         warmup: bool = False,
     ):
         headers: dict[str, str] = {}
@@ -2463,7 +2687,7 @@ class _Http:
             f"/v1/apps/{app_id}/run",
             method="POST",
             headers=headers,
-            body={"agent_id": agent_id, "workflow_id": agent_id, "warmup": bool(warmup), "input": input_payload},
+            body={"agent_id": agent_id, "workflow_id": agent_id, "warmup": bool(warmup), "input": input_payload or {}},
             auth_header=auth_header,
             timeout_seconds=run_timeout_seconds,
         )
@@ -2746,6 +2970,9 @@ class AraClient:
         env_key = os.getenv("ARA_RUNTIME_KEY", "").strip()
         if env_key:
             return env_key
+        local_key = _load_local_runtime_key(self.cwd, slug=str(self.manifest.get("slug") or ""))
+        if local_key:
+            return local_key
         return ""
 
     def _resolve_app_header_key(self, explicit: Optional[str] = None) -> str:
@@ -2937,6 +3164,7 @@ class AraClient:
         runtime_key = str(key_out.get("key") or "").strip()
         if not runtime_key:
             raise RuntimeError("deploy failed: runtime key missing")
+        _save_local_runtime_key(self.cwd, slug=str(self.manifest.get("slug") or ""), runtime_key=runtime_key)
 
         warmup = None
         if warm:
@@ -2960,7 +3188,7 @@ class AraClient:
     def run(
         self,
         *,
-        agent_id: Optional[str],
+        agent_id: Optional[str] = None,
         input_payload: Optional[dict[str, Any]] = None,
         runtime_key: Optional[str] = None,
         app_header_key: Optional[str] = None,
@@ -3044,6 +3272,7 @@ class AraClient:
             runtime_key = str(key_out.get("key") or "").strip()
             if runtime_key:
                 runtime_key_created = True
+                _save_local_runtime_key(self.cwd, slug=str(self.manifest.get("slug") or ""), runtime_key=runtime_key)
 
         app_header_key = self._resolve_app_header_key()
         x_key_created = False
@@ -3259,6 +3488,11 @@ class AraRuntimeClient:
         job_name = str(name or "").strip()
         if not job_name:
             raise RuntimeError("automation add requires --name")
+        normalized_payload = dict(payload or {})
+        payload_kind = str(normalized_payload.get("kind") or "").strip().lower()
+        if payload_kind in {"agent_turn", "app_agent_call"}:
+            normalized_payload.setdefault("deliver", True)
+            normalized_payload.setdefault("channel", "linq")
         kind = str(schedule_kind or "").strip().lower()
         if kind not in {"every", "cron"}:
             raise RuntimeError("automation add requires schedule kind 'every' or 'cron'")
@@ -3281,7 +3515,7 @@ class AraRuntimeClient:
                 "every_seconds": every_seconds if kind == "every" else None,
                 "schedule_expr": str(schedule_expr or "").strip() if kind == "cron" else None,
                 "timezone": str(timezone or "UTC").strip() or "UTC",
-                "payload": dict(payload or {}),
+                "payload": normalized_payload,
                 "execution_mode": str(execution_mode or "sandbox_required"),
                 "misfire_policy": str(misfire_policy or "fire_latest_only"),
                 "max_retries": int(max_retries),
@@ -4609,9 +4843,6 @@ def _run_app_cli(app: _AutomationApp | dict[str, Any], argv: Optional[list[str]]
     sub.add_parser("up", parents=[_deploy_parent])
 
     p_run = sub.add_parser("run")
-    p_run.add_argument("--agent", default="")
-    p_run.add_argument("--input", action="append", default=[])
-    p_run.add_argument("--input-json", default="")
     p_run.add_argument("--runtime-key", default="")
     p_run.add_argument("--app-header-key", default="")
 
@@ -4657,14 +4888,12 @@ def _run_app_cli(app: _AutomationApp | dict[str, Any], argv: Optional[list[str]]
         return
 
     if command == "run":
-        payload = _parse_json_object_arg(args.input_json, flag_name="--input-json") if str(args.input_json).strip() else _parse_pairs(args.input)
-        run_id = str(payload.get("run_id") or "").strip() or _new_run_id()
-        payload.setdefault("run_id", run_id)
-        payload.setdefault("idempotency_key", f"{_slugify(args.agent or 'default-agent')}-{_slugify(run_id)}")
+        run_id = _new_run_id()
+        payload = {"run_id": run_id, "idempotency_key": f"automation-{_slugify(run_id)}"}
         print(
             json.dumps(
                 client.run(
-                    agent_id=args.agent or None,
+                    agent_id=None,
                     input_payload=payload,
                     runtime_key=args.runtime_key or None,
                     app_header_key=args.app_header_key or None,

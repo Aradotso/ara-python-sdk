@@ -27,7 +27,7 @@ def _print_help(bin_name: str) -> None:
                 "",
                 "Examples:",
                 f"  {bin_name} deploy app.py",
-                f"  {bin_name} run app.py --agent booking_coordinator --input-json '{{\"trigger\":\"manual\"}}'",
+                f"  {bin_name} run app.py",
                 f"  {bin_name} auth login",
                 "",
                 "More help:",

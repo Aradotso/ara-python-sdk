@@ -3,7 +3,7 @@ import ara_sdk as ara
 # HOW TO RUN (minimal):
 # 1) ara auth login
 # 2) ara deploy examples/05-entrypoint-install.py
-# 3) ara run examples/05-entrypoint-install.py --agent entrypoint-agent --input-json '{"trigger":"manual"}'
+# 3) ara run examples/05-entrypoint-install.py
 #
 # This script uses entrypoint to install a package before tools run.
 

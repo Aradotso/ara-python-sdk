@@ -8,11 +8,23 @@ Getting-started set:
 - `04-env-and-secrets.py`
 - `05-entrypoint-install.py`
 - `06-news-digest-resend-exa.py`
+- `07-file-journal.py`
+- `08-news-board.py`
+- `09-collab-studio.py`
+- `10-local-visual-console.py` (local web UI for `09-collab-studio.py`)
 
 Minimal command pattern (replace script name):
 
 ```bash
 ara auth login
 ara deploy examples/<script.py>
-ara run examples/<script.py> --agent <agent_id> --input-json '{"trigger":"manual"}'
+ara run examples/<script.py>
+```
+
+Visual demo (local browser UI):
+
+```bash
+# requires EXA_API_KEY for examples/09-collab-studio.py
+python examples/10-local-visual-console.py
+# then open http://127.0.0.1:8787
 ```

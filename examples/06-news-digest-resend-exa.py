@@ -1,31 +1,52 @@
 import ara_sdk as ara
 
 # HOW TO RUN (minimal):
-# 1) export EXA_API_KEY="..."
-# 2) export RESEND_API_KEY="..."
-# 3) export CRON_EMAIL_FROM="alerts@yourdomain.com"
-# 4) export DIGEST_TO="you@yourdomain.com"
-# 5) ara auth login
-# 6) ara deploy examples/06-news-digest-resend-exa.py
-# 7) ara run examples/06-news-digest-resend-exa.py --agent morning-news-digest-agent-v3 --input-json '{"trigger":"manual"}'
-# 8) For testing, in app.ara.so set cron to: * * * * * (every minute) and enable it.
-# 9) For normal use, switch cron to: 0 9 * * * (every morning at 09:00).
+# 1) Create .env.local in ara-python-sdk/:
+#    EXA_API_KEY=...
+#    RESEND_API_KEY=...
+#    CRON_EMAIL_FROM=alerts@yourdomain.com   # optional
+#    DIGEST_TO=you@yourdomain.com            # optional
+# 2) ara auth login
+# 3) ara deploy examples/06-news-digest-resend-exa.py
+# 4) ara run examples/06-news-digest-resend-exa.py
+# 5) For testing, in app.ara.so set cron to: * * * * * (every minute) and enable it.
+# 6) For normal use, switch cron to: 0 9 * * * (every morning at 09:00).
 
+SYSTEM_INSTRUCTIONS = (
+    "On every run, call fetch_news_digest, then call send_news_digest. "
+    "Do not answer until both tools have been called."
+)
+
+
+def _load_dotenv() -> None:
+    import os
+    from pathlib import Path
+
+    for filename in (".env", ".env.local"):
+        path = Path(filename)
+        if not path.exists():
+            continue
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+_load_dotenv()
 
 @ara.tool
 def fetch_news_digest() -> dict:
     import subprocess
     import sys
-    import time
 
     exa_api_key = ara.secret("EXA_API_KEY")
     topic = ara.env("DIGEST_TOPIC", default="AI agents, startups, and developer tools")
 
     try:
-        # Docs-aligned path: use Exa official SDK client.
         from exa_py import Exa
     except ImportError:
-        # Fallback: install in-sandbox if startup hooks are unavailable.
         try:
             subprocess.run(
                 [
@@ -44,22 +65,15 @@ def fetch_news_digest() -> dict:
             return {"ok": False, "error": "missing_exa_py", "details": str(exc)}
 
     exa = Exa(exa_api_key)
-    data = None
-    last_error = ""
-    for attempt in range(3):
-        try:
-            data = exa.search(
-                f"latest updates about {topic}",
-                type="auto",
-                num_results=5,
-                contents={"highlights": {"maxCharacters": 500}},
-            )
-            break
-        except Exception as exc:  # noqa: BLE001
-            last_error = str(exc)
-            if attempt >= 2:
-                return {"ok": False, "error": last_error}
-            time.sleep(1.0 + attempt)
+    try:
+        data = exa.search(
+            f"latest updates about {topic}",
+            type="auto",
+            num_results=5,
+            contents={"highlights": {"maxCharacters": 500}},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": "exa_search_failed", "details": str(exc)}
 
     results = data.results if hasattr(data, "results") and isinstance(data.results, list) else []
     lines = []
@@ -84,8 +98,8 @@ def send_news_digest(subject: str, body: str) -> dict:
     import urllib.request
 
     resend_api_key = ara.secret("RESEND_API_KEY")
-    sender = ara.secret("CRON_EMAIL_FROM")
-    recipient = ara.secret("DIGEST_TO")
+    sender = ara.env("CRON_EMAIL_FROM", default="alerts@yourdomain.com")
+    recipient = ara.env("DIGEST_TO", default=sender)
 
     payload = {
         "from": sender,
@@ -94,41 +108,31 @@ def send_news_digest(subject: str, body: str) -> dict:
         "text": str(body or "").strip(),
     }
 
-    def _post_json(url: str, payload: dict, headers: dict) -> dict:
-        request = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            method="POST",
-            headers=headers,
-        )
+    request = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {resend_api_key}",
+            "User-Agent": "ara-sdk-examples/06-news-digest",
+        },
+    )
+    try:
         with urllib.request.urlopen(request, timeout=30) as response:
             raw = response.read().decode("utf-8", errors="replace")
-            return json.loads(raw) if raw else {}
-
-    try:
-        data = _post_json(
-            "https://api.resend.com/emails",
-            payload,
-            {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {resend_api_key}",
-                "User-Agent": "ara-sdk-examples/06-news-digest",
-            },
-        )
+            data = json.loads(raw) if raw else {}
     except urllib.error.HTTPError as exc:
         details = exc.read().decode("utf-8", errors="replace")
         return {"ok": False, "error": f"resend_http_{exc.code}", "details": details[:800]}
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": str(exc)}
+        return {"ok": False, "error": "resend_request_failed", "details": str(exc)}
 
     return {"ok": True, "email_id": data.get("id"), "to": recipient}
 
 
 ara.Automation(
     "morning-news-digest-agent-v3",
-    system_instructions=(
-        "Every morning, use fetch_news_digest to gather 5 relevant updates. "
-        "Then use send_news_digest to email a concise digest."
-    ),
+    system_instructions=SYSTEM_INSTRUCTIONS,
     tools=[fetch_news_digest, send_news_digest],
 )

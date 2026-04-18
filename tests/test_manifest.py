@@ -1,5 +1,6 @@
 import importlib.util
 import io
+import stat
 import urllib.error
 
 import pytest
@@ -42,6 +43,93 @@ def test_minimal_automation_declaration_builds_manifest_without_app_variable():
     assert manifest["agent"]["agents"][0]["id"] == "weekday-priority-agent"
     assert manifest["agent"]["agents"][0]["skills"] == ["send_email"]
     assert manifest["agent"]["tools"][0]["required_env"] == ["CRON_EMAIL_FROM"]
+    assert manifest["interfaces"]["inherit_owner_tools"] is True
+
+
+def test_automation_connector_skills_compile_to_tool_privileges():
+    core._pop_minimal_app()
+
+    @core.tool
+    def summarize() -> dict:
+        return {"ok": True}
+
+    core.Automation(
+        "calendar-helper",
+        system_instructions="Handle calendar requests.",
+        tools=[summarize],
+        skills=[
+            core.connectors.google_calendar.list_events,
+            core.connectors.google_calendar.create_event,
+        ],
+    )
+
+    app = core._pop_minimal_app()
+    assert app is not None
+    manifest = app.manifest
+    assert manifest["interfaces"]["inherit_owner_tools"] is True
+    assert manifest["interfaces"]["tool_privileges"] == [
+        {
+            "toolkit": "googlecalendar",
+            "allowed_actions": ["create_event", "list_events"],
+            "scopes": [],
+        }
+    ]
+    assert manifest["agent"]["agents"][0]["skills"] == [
+        "summarize",
+        "connector:googlecalendar:list_events",
+        "connector:googlecalendar:create_event",
+    ]
+
+
+def test_automation_connector_wildcard_overrides_specific_actions():
+    core._pop_minimal_app()
+    core.Automation(
+        "calendar-wide",
+        system_instructions="Handle calendar broadly.",
+        skills=[
+            core.connectors.google_calendar.list_events,
+            core.connectors.google_calendar,
+        ],
+    )
+
+    app = core._pop_minimal_app()
+    assert app is not None
+    manifest = app.manifest
+    assert manifest["interfaces"]["tool_privileges"] == [
+        {"toolkit": "googlecalendar", "allowed_actions": [], "scopes": []}
+    ]
+
+
+def test_automation_can_disable_connectors_explicitly():
+    core._pop_minimal_app()
+    core.Automation(
+        "connectors-off",
+        system_instructions="No connector usage.",
+        allow_connector_tools=False,
+    )
+
+    app = core._pop_minimal_app()
+    assert app is not None
+    manifest = app.manifest
+    assert manifest["interfaces"]["inherit_owner_tools"] is False
+
+
+def test_explicit_connector_skills_override_allow_connector_tools_false():
+    core._pop_minimal_app()
+    core.Automation(
+        "connectors-scoped",
+        system_instructions="Use only Gmail send email.",
+        allow_connector_tools=False,
+        skills=[core.connectors.gmail.send_email],
+    )
+
+    app = core._pop_minimal_app()
+    assert app is not None
+    manifest = app.manifest
+    assert manifest["interfaces"]["inherit_owner_tools"] is True
+    assert manifest["interfaces"]["tool_privileges"] == [
+        {"toolkit": "gmail", "allowed_actions": ["send_email"], "scopes": []}
+    ]
 
 
 def test_from_env_uses_api_key(monkeypatch, tmp_path):
@@ -50,6 +138,34 @@ def test_from_env_uses_api_key(monkeypatch, tmp_path):
 
     client = core.AraClient.from_env(manifest=_manifest_with_runtime(runtime_profile={}), cwd=str(tmp_path))
     assert client.http.api_key == "ara_api_key_primary_0123456789abcdef"
+
+
+def test_runtime_key_resolves_from_local_cache(tmp_path):
+    client = core.AraClient(
+        manifest=_manifest_with_runtime(runtime_profile={}),
+        api_base_url="https://api.ara.so",
+        api_key="token",
+        cwd=tmp_path,
+    )
+    core._save_local_runtime_key(tmp_path, slug="test-app", runtime_key="ak_app_cached_local")
+
+    assert client._resolve_runtime_key() == "ak_app_cached_local"
+
+
+def test_runtime_key_cache_written_with_secure_permissions(tmp_path):
+    core._save_local_runtime_key(tmp_path, slug="test-app", runtime_key="ak_app_secure")
+    path = tmp_path / core.CLI_RUNTIME_KEYS_FILENAME
+    assert path.exists()
+    mode = stat.S_IMODE(path.stat().st_mode)
+    assert mode == 0o600
+
+
+def test_merge_connector_tool_privileges_rejects_invalid_explicit_actions():
+    with pytest.raises(ValueError, match="allowed_actions contained no valid"):
+        core._merge_connector_tool_privileges(
+            [{"toolkit": "gmail", "allowed_actions": ["!!!"]}],
+            [],
+        )
 
 
 def test_from_env_requires_api_key(monkeypatch, tmp_path):
@@ -132,6 +248,8 @@ def test_top_level_module_does_not_expose_legacy_symbols():
         "AraRuntimeClient",
     ):
         assert not hasattr(ara_sdk, symbol)
+    assert hasattr(ara_sdk, "connectors")
+
 
 
 def test_deploy_reconciles_when_secret_refs_are_added_during_plan(monkeypatch, tmp_path):
