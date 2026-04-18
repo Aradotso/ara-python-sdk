@@ -12,6 +12,7 @@ Getting-started set:
 - `08-news-board.py`
 - `09-collab-studio.py`
 - `10-local-visual-console.py` (local web UI for `09-collab-studio.py`)
+- `11-gmail-to-imessage.py`
 
 Minimal command pattern (replace script name):
 
