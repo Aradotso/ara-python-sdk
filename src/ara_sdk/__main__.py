@@ -9,6 +9,7 @@ from .core import (
     _pop_minimal_app,
     _run_app_cli,
     run_auth_cli,
+    run_runtime_cli,
 )
 
 
@@ -24,11 +25,13 @@ def _print_help(bin_name: str) -> None:
                 "",
                 "Global command groups (no app script required):",
                 "  auth      login/whoami/logout/rotate for CLI auth",
+                "  runtime   runtime capabilities + tools/files/exec operations",
                 "",
                 "Examples:",
                 f"  {bin_name} deploy app.py",
                 f"  {bin_name} run app.py",
                 f"  {bin_name} auth login",
+                f"  {bin_name} runtime --help",
                 "",
                 "More help:",
                 f"  {bin_name} <command> <automation_script.py> --help",
@@ -65,6 +68,12 @@ def main() -> None:
             run_auth_cli(argv=["--help"])
             return
         run_auth_cli(argv=sys.argv[2:])
+        return
+    if len(sys.argv) >= 2 and sys.argv[1] == "runtime":
+        if len(sys.argv) == 2:
+            run_runtime_cli(argv=["--help"])
+            return
+        run_runtime_cli(argv=sys.argv[2:])
         return
     if len(sys.argv) < 3:
         raise SystemExit(f"Usage: {bin_name} <command> <automation_script.py> [args...]")

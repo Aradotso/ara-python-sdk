@@ -3614,6 +3614,145 @@ class AraRuntimeClient:
             timeout_seconds=request_timeout,
         )
 
+    @staticmethod
+    def _resolve_workspace_path(path: str, *, default_to_workspace_root: bool = False) -> str:
+        value = str(path or "").strip()
+        if not value:
+            if default_to_workspace_root:
+                return CLI_WORKSPACE_PATH
+            raise RuntimeError("path is required")
+        if value.startswith("/"):
+            return value
+        return f"{CLI_WORKSPACE_PATH.rstrip('/')}/{value.lstrip('/')}"
+
+    @staticmethod
+    def _content_disposition_filename(content_disposition: str, fallback: str) -> str:
+        text = str(content_disposition or "")
+        match = re.search(r'filename="([^"]+)"', text)
+        if match:
+            candidate = str(match.group(1) or "").strip()
+            if candidate:
+                normalized = candidate.replace("\\", "/")
+                safe_name = pathlib.Path(normalized).name
+                if safe_name not in {"", ".", ".."}:
+                    return safe_name
+        return fallback
+
+    @staticmethod
+    def _sanitize_multipart_filename(filename: str) -> str:
+        raw = str(filename or "").replace('"', '\\"').replace("\r", "").replace("\n", "")
+        return raw or "upload.bin"
+
+    def session_files_list(self, *, path: str = "") -> dict[str, Any]:
+        target_path = self._resolve_workspace_path(path, default_to_workspace_root=True)
+        query = urllib.parse.urlencode({"path": target_path})
+        return self.http._request(f"/session/files?{query}", method="GET")
+
+    def session_file_read(self, *, path: str) -> dict[str, Any]:
+        target_path = self._resolve_workspace_path(path)
+        query = urllib.parse.urlencode({"path": target_path})
+        return self.http._request(f"/session/files/read?{query}", method="GET")
+
+    def session_file_write(self, *, path: str, content: str) -> dict[str, Any]:
+        target_path = self._resolve_workspace_path(path)
+        return self.http._request(
+            "/session/files/write",
+            method="POST",
+            body={
+                "writes": [{"path": target_path, "content": str(content)}],
+                "restart": False,
+            },
+        )
+
+    def session_file_upload(self, *, local_path: str, remote_path: str = "") -> dict[str, Any]:
+        local = pathlib.Path(local_path).expanduser()
+        if not local.exists() or not local.is_file():
+            raise RuntimeError(f"upload source file not found: {local}")
+        payload = local.read_bytes()
+        normalized_remote = ""
+        if str(remote_path or "").strip():
+            normalized_remote = self._resolve_workspace_path(remote_path)
+
+        boundary = f"----AraSdkBoundary{uuid4().hex}"
+        filename = self._sanitize_multipart_filename(local.name or "upload.bin")
+        lines: list[bytes] = []
+        lines.append(f"--{boundary}\r\n".encode("utf-8"))
+        lines.append(b'Content-Disposition: form-data; name="path"\r\n\r\n')
+        lines.append(normalized_remote.encode("utf-8"))
+        lines.append(b"\r\n")
+        lines.append(f"--{boundary}\r\n".encode("utf-8"))
+        lines.append(
+            (
+                'Content-Disposition: form-data; name="file"; '
+                f'filename="{filename}"\r\n'
+            ).encode("utf-8")
+        )
+        lines.append(b"Content-Type: application/octet-stream\r\n\r\n")
+        lines.append(payload)
+        lines.append(b"\r\n")
+        lines.append(f"--{boundary}--\r\n".encode("utf-8"))
+        body = b"".join(lines)
+
+        req_headers: dict[str, str] = {
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        }
+        if self.http.api_key:
+            req_headers["Authorization"] = f"Bearer {self.http.api_key}"
+        req = urllib.request.Request(
+            f"{self.http.base_url}/session/files/upload",
+            method="POST",
+            headers=req_headers,
+            data=body,
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=120) as response:
+                raw = response.read().decode("utf-8")
+                parsed = json.loads(raw) if raw else {}
+                return parsed if isinstance(parsed, dict) else {"ok": True}
+        except urllib.error.HTTPError as exc:
+            details = exc.read().decode("utf-8", errors="replace")
+            if _env_flag_enabled(DEBUG_HTTP_ERRORS_ENV):
+                raise RuntimeError(f"POST /session/files/upload failed ({exc.code}): {details}") from exc
+            raise RuntimeError(
+                f"POST /session/files/upload failed ({exc.code}). "
+                f"Response body hidden by default; set {DEBUG_HTTP_ERRORS_ENV}=true to include it."
+            ) from exc
+        except (TimeoutError, urllib.error.URLError) as exc:
+            message = str(exc.reason) if isinstance(exc, urllib.error.URLError) else str(exc)
+            raise RuntimeError(f"POST /session/files/upload failed (network): {message}") from exc
+
+    def session_file_download(self, *, path: str) -> tuple[bytes, str, str]:
+        target_path = self._resolve_workspace_path(path)
+        query = urllib.parse.urlencode({"path": target_path})
+        req_headers: dict[str, str] = {}
+        if self.http.api_key:
+            req_headers["Authorization"] = f"Bearer {self.http.api_key}"
+        req = urllib.request.Request(
+            f"{self.http.base_url}/session/files/download?{query}",
+            method="GET",
+            headers=req_headers,
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=120) as response:
+                payload = response.read()
+                fallback_name = pathlib.Path(target_path).name or "download.bin"
+                filename = self._content_disposition_filename(
+                    response.headers.get("Content-Disposition", ""),
+                    fallback=fallback_name,
+                )
+                return payload, filename, target_path
+        except urllib.error.HTTPError as exc:
+            details = exc.read().decode("utf-8", errors="replace")
+            if _env_flag_enabled(DEBUG_HTTP_ERRORS_ENV):
+                raise RuntimeError(f"GET /session/files/download failed ({exc.code}): {details}") from exc
+            raise RuntimeError(
+                f"GET /session/files/download failed ({exc.code}). "
+                f"Response body hidden by default; set {DEBUG_HTTP_ERRORS_ENV}=true to include it."
+            ) from exc
+        except (TimeoutError, urllib.error.URLError) as exc:
+            message = str(exc.reason) if isinstance(exc, urllib.error.URLError) else str(exc)
+            raise RuntimeError(f"GET /session/files/download failed (network): {message}") from exc
+
     def session_heartbeat(self) -> dict[str, Any]:
         result = self.http._request("/session/heartbeat", method="POST", body={})
         if result is None:
@@ -4415,7 +4554,12 @@ def _stream_logs_for_run_until_terminal_event(
 
 
 def run_runtime_cli(argv: Optional[list[str]] = None) -> None:
-    parser = argparse.ArgumentParser(description="Ara runtime CLI")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Ara runtime CLI (authenticated via `ara auth login` or `ARA_API_KEY`; "
+            "no separate runtime token required)"
+        )
+    )
     sub = parser.add_subparsers(dest="scope", required=True)
 
     p_session = sub.add_parser("session")
@@ -4528,11 +4672,53 @@ def run_runtime_cli(argv: Optional[list[str]] = None) -> None:
     p_tools_list.add_argument("--session", required=True)
     p_tools_list.add_argument("--kind", choices=["all", "builtin", "app", "connector"], default="all")
     p_tools_list.add_argument("--agent", default="")
+    p_tools_available = sub_tools.add_parser("available")
+    p_tools_available.add_argument("--session", required=True)
+    p_tools_available.add_argument("--kind", choices=["all", "builtin", "app", "connector"], default="all")
+    p_tools_available.add_argument("--agent", default="")
     p_tools_exec = sub_tools.add_parser("execute")
     p_tools_exec.add_argument("--session", required=True)
     p_tools_exec.add_argument("--tool", default="")
     p_tools_exec.add_argument("--agent", default="")
     p_tools_exec.add_argument("--arg", action="append", default=[])
+
+    p_files = sub.add_parser("files")
+    p_files.description = "File operations against your active session (no --session flag)."
+    sub_files = p_files.add_subparsers(dest="command", required=True)
+    p_files_list = sub_files.add_parser("list")
+    p_files_list.add_argument(
+        "--path",
+        default=CLI_WORKSPACE_PATH,
+        help="Workspace-relative path or absolute sandbox path.",
+    )
+    p_files_read = sub_files.add_parser("read")
+    p_files_read.add_argument("--path", required=True)
+    p_files_write = sub_files.add_parser("write")
+    p_files_write.add_argument("--path", required=True)
+    p_files_write.add_argument(
+        "--content",
+        default="",
+        help="Inline text content. Ignored when --content-file is set.",
+    )
+    p_files_write.add_argument(
+        "--content-file",
+        default="",
+        help="Read file content from a local text file.",
+    )
+    p_files_upload = sub_files.add_parser("upload")
+    p_files_upload.add_argument("--local", required=True, help="Local source file path.")
+    p_files_upload.add_argument(
+        "--path",
+        default="",
+        help="Remote destination path (defaults to workspace root + local filename).",
+    )
+    p_files_download = sub_files.add_parser("download")
+    p_files_download.add_argument("--path", required=True, help="Remote workspace path.")
+    p_files_download.add_argument(
+        "--output",
+        default="",
+        help="Local output path (defaults to current directory + remote filename).",
+    )
 
     p_control = sub.add_parser("control")
     sub_control = p_control.add_subparsers(dest="command", required=True)
@@ -4781,7 +4967,7 @@ def run_runtime_cli(argv: Optional[list[str]] = None) -> None:
         print(json.dumps(client.skills(session_id=args.session), indent=2))
         return
 
-    if args.scope == "tools" and args.command == "list":
+    if args.scope == "tools" and args.command in {"list", "available"}:
         print(
             json.dumps(
                 client.tools(
@@ -4806,6 +4992,71 @@ def run_runtime_cli(argv: Optional[list[str]] = None) -> None:
                     args=_parse_pairs(args.arg or []),
                     agent_id=args.agent or "",
                 ),
+                indent=2,
+            )
+        )
+        return
+
+    if args.scope == "files" and args.command == "list":
+        print(json.dumps(client.session_files_list(path=args.path), indent=2))
+        return
+
+    if args.scope == "files" and args.command == "read":
+        print(json.dumps(client.session_file_read(path=args.path), indent=2))
+        return
+
+    if args.scope == "files" and args.command == "write":
+        content = str(args.content or "")
+        content_file = str(args.content_file or "").strip()
+        if content_file:
+            local_content_path = pathlib.Path(content_file).expanduser()
+            if not local_content_path.exists():
+                raise SystemExit(f"ara runtime: content file not found: {local_content_path}")
+            content = local_content_path.read_text(encoding="utf-8")
+        print(
+            json.dumps(
+                client.session_file_write(
+                    path=args.path,
+                    content=content,
+                ),
+                indent=2,
+            )
+        )
+        return
+
+    if args.scope == "files" and args.command == "upload":
+        print(
+            json.dumps(
+                client.session_file_upload(
+                    local_path=args.local,
+                    remote_path=args.path,
+                ),
+                indent=2,
+            )
+        )
+        return
+
+    if args.scope == "files" and args.command == "download":
+        payload, filename, remote_path = client.session_file_download(path=args.path)
+        output_text = str(args.output or "").strip()
+        if output_text:
+            output_path = pathlib.Path(output_text).expanduser()
+        else:
+            safe_filename = pathlib.Path(str(filename or "").replace("\\", "/")).name
+            if safe_filename in {"", ".", ".."}:
+                safe_filename = "download.bin"
+            output_path = pathlib.Path(os.getcwd()) / safe_filename
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(payload)
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "remote_path": remote_path,
+                    "filename": filename,
+                    "bytes": len(payload),
+                    "output_path": str(output_path),
+                },
                 indent=2,
             )
         )
@@ -5351,7 +5602,5 @@ sandbox = _RemovedLegacyAPI("sandbox(...)")
 entrypoint = _RemovedLegacyAPI("entrypoint(...)")
 file = _RemovedLegacyAPI("file(...)")
 local_file = _RemovedLegacyAPI("local_file(...)")
-AraRuntimeClient = _RemovedLegacyAPI("AraRuntimeClient")
-run_runtime_cli = _RemovedLegacyAPI("run_runtime_cli")
 run_connect_cli = _RemovedLegacyAPI("run_connect_cli")
 run_ssh_proxy_cli = _RemovedLegacyAPI("run_ssh_proxy_cli")

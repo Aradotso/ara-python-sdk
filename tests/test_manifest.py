@@ -1,6 +1,7 @@
 import importlib.util
 import io
 import json
+import pathlib
 import ssl
 import stat
 import threading
@@ -633,6 +634,46 @@ def test_deploy_cli_log_flag_tails_logs_and_writes_file(monkeypatch, capsys, tmp
     log_contents = log_path.read_text(encoding="utf-8")
     assert "run=run_cron_1 event=run.started Cron run started" in log_contents
     assert "run=run_cron_1 event=run.completed Cron run completed" in log_contents
+
+
+def test_runtime_content_disposition_filename_sanitizes_path_components():
+    parsed = core.AraRuntimeClient._content_disposition_filename(
+        'attachment; filename="../../.bashrc"',
+        fallback="download.bin",
+    )
+    assert parsed == ".bashrc"
+
+    parsed_windows = core.AraRuntimeClient._content_disposition_filename(
+        'attachment; filename="..\\\\..\\\\evil.txt"',
+        fallback="download.bin",
+    )
+    assert parsed_windows == "evil.txt"
+
+
+def test_runtime_upload_filename_sanitizes_multipart_header_chars():
+    filename = core.AraRuntimeClient._sanitize_multipart_filename('draft"\r\nx.txt')
+    assert filename == 'draft\\"x.txt'
+
+
+def test_runtime_cli_files_download_sanitizes_server_filename(monkeypatch, tmp_path, capsys):
+    class _FakeRuntimeClient:
+        def session_file_download(self, *, path):
+            _ = path
+            return (b"hello", "../../escape.txt", "/root/.ara/workspace/escape.txt")
+
+    monkeypatch.setattr(
+        core.AraRuntimeClient,
+        "from_env",
+        classmethod(lambda cls, *, cwd=None: _FakeRuntimeClient()),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    core.run_runtime_cli(["files", "download", "--path", "escape.txt"])
+
+    output = json.loads(capsys.readouterr().out)
+    resolved_output = pathlib.Path(output["output_path"])
+    assert resolved_output == tmp_path / "escape.txt"
+    assert resolved_output.read_bytes() == b"hello"
 
 
 def test_top_level_module_does_not_expose_legacy_symbols():

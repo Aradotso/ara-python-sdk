@@ -73,6 +73,20 @@ ARA_API_KEY="<your_key>" ara deploy app.py
 ara run app.py
 ```
 
+Runtime CLI commands also use the same auth source (`ara auth login` credentials or `ARA_API_KEY`) and do not require separate runtime/API-session tokens:
+
+```bash
+ara runtime session start
+ara runtime tools available --session <session_id>
+ara runtime session exec --command "ls -la /root/.ara/workspace"
+ara runtime files read --path notes/todo.txt
+ara runtime files write --path notes/todo.txt --content "updated from cli"
+ara runtime files upload --local ./draft.md --path notes/draft.md
+ara runtime files download --path notes/draft.md --output ./draft-copy.md
+```
+
+`ara runtime files *` targets your active personal session directly, so it does not take a `--session` flag.
+
 
 ## Run maintained examples
 

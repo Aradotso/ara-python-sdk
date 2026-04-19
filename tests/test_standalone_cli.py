@@ -64,7 +64,7 @@ def test_standalone_cli_help_lists_minimal_command_surface(monkeypatch, capsys):
     assert "deploy, up, run, logs" in out
     assert "--message" not in out
     assert "auth      login/whoami/logout/rotate for CLI auth" in out
-    assert "runtime   runtime capabilities, tools, skills, and control APIs" not in out
+    assert "runtime   runtime capabilities + tools/files/exec operations" in out
 
 
 def test_auth_group_prints_group_help_without_subcommand(monkeypatch):
@@ -85,8 +85,44 @@ def test_auth_group_prints_group_help_without_subcommand(monkeypatch):
     assert captured["argv"] == ["--help"]
 
 
+def test_runtime_group_prints_group_help_without_subcommand(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _run_runtime_cli(argv=None):
+        captured["argv"] = list(argv or [])
+
+    monkeypatch.setattr(sdk_main, "run_runtime_cli", _run_runtime_cli)
+    monkeypatch.setattr(
+        sdk_main.sys,
+        "argv",
+        ["ara", "runtime"],
+    )
+
+    sdk_main.main()
+
+    assert captured["argv"] == ["--help"]
+
+
+def test_runtime_group_forwards_runtime_arguments(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _run_runtime_cli(argv=None):
+        captured["argv"] = list(argv or [])
+
+    monkeypatch.setattr(sdk_main, "run_runtime_cli", _run_runtime_cli)
+    monkeypatch.setattr(
+        sdk_main.sys,
+        "argv",
+        ["ara", "runtime", "tools", "available", "--session", "sess_123"],
+    )
+
+    sdk_main.main()
+
+    assert captured["argv"] == ["tools", "available", "--session", "sess_123"]
+
+
 def test_removed_global_groups_require_script_and_fail_usage(monkeypatch):
-    for command in ("runtime", "session", "automation", "connect", "ssh-proxy", "start", "status", "stop"):
+    for command in ("session", "automation", "connect", "ssh-proxy", "start", "status", "stop"):
         monkeypatch.setattr(sdk_main.sys, "argv", ["ara", command])
         with pytest.raises(SystemExit, match=r"Usage: ara <command> <automation_script.py> \[args...\]"):
             sdk_main.main()
