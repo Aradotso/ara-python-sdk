@@ -4,7 +4,7 @@ import ara_sdk as ara
 # 1) ara auth login
 # 2) ara deploy examples/00-hello-hourly.py
 # 3) ara run examples/00-hello-hourly.py
-# 4) In app.ara.so, set schedule cron to: 0 * * * * (every hour) and enable it.
+# 4) ara deploy app.py --cron "*/5 * * * *" uploads/registers the automation in the cloud with a 5-minute cron schedule.
 
 @ara.tool
 def utc_now() -> dict:
