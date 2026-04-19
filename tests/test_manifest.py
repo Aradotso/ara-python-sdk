@@ -1,6 +1,7 @@
 import importlib.util
 import io
 import json
+import ssl
 import stat
 import threading
 import time
@@ -245,6 +246,86 @@ def test_http_error_includes_response_body_in_debug_mode(monkeypatch):
     message = str(exc.value)
     assert "GET /apps failed (504):" in message
     assert details in message
+
+
+def test_http_retries_ssl_cert_verify_fail_with_certifi_bundle(monkeypatch):
+    class _FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return b'{"ok": true}'
+
+    calls: list[dict[str, Any]] = []
+    certifi_context = object()
+    ssl_error = ssl.SSLCertVerificationError(1, "certificate verify failed")
+
+    def _urlopen(req, timeout=None, context=None):
+        _ = req
+        calls.append({"timeout": timeout, "context": context})
+        if len(calls) == 1:
+            raise urllib.error.URLError(ssl_error)
+        return _FakeResponse()
+
+    monkeypatch.setattr(core, "_certifi_ssl_context", lambda: certifi_context)
+    monkeypatch.setattr(core.urllib.request, "urlopen", _urlopen)
+
+    http = core._Http(base_url="https://api.ara.so", api_key="test-token")
+    out = http.list_apps()
+
+    assert out == {"ok": True}
+    assert len(calls) == 2
+    assert calls[0]["context"] is None
+    assert calls[1]["context"] is certifi_context
+
+
+def test_http_ssl_cert_verify_fail_without_fallback_includes_actionable_hint(monkeypatch):
+    ssl_error = ssl.SSLCertVerificationError(1, "certificate verify failed")
+
+    def _raise_ssl(*args, **kwargs):
+        _ = (args, kwargs)
+        raise urllib.error.URLError(ssl_error)
+
+    monkeypatch.setattr(core, "_certifi_ssl_context", lambda: None)
+    monkeypatch.setattr(core.urllib.request, "urlopen", _raise_ssl)
+
+    http = core._Http(base_url="https://api.ara.so", api_key="test-token")
+    with pytest.raises(RuntimeError) as exc:
+        http.list_apps()
+
+    message = str(exc.value)
+    assert "TLS certificate verification failed." in message
+    assert "Install or upgrade certifi" in message
+
+
+def test_http_ssl_cert_verify_fail_after_certifi_retry_includes_retry_hint(monkeypatch):
+    ssl_error = ssl.SSLCertVerificationError(1, "certificate verify failed")
+    certifi_context = object()
+    calls: list[dict[str, Any]] = []
+
+    def _raise_ssl(req, timeout=None, context=None):
+        _ = req
+        calls.append({"timeout": timeout, "context": context})
+        raise urllib.error.URLError(ssl_error)
+
+    monkeypatch.setattr(core, "_certifi_ssl_context", lambda: certifi_context)
+    monkeypatch.setattr(core.urllib.request, "urlopen", _raise_ssl)
+
+    http = core._Http(base_url="https://api.ara.so", api_key="test-token")
+    with pytest.raises(RuntimeError) as exc:
+        http.list_apps()
+
+    message = str(exc.value)
+    assert "TLS certificate verification failed." in message
+    assert "Retried with certifi CA bundle, but TLS verification still failed." in message
+    assert len(calls) == 2
+    assert calls[0]["context"] is None
+    assert calls[1]["context"] is certifi_context
 
 
 def test_app_cli_rejects_removed_legacy_commands():

@@ -22,6 +22,7 @@ import sys
 import threading
 import textwrap
 import time
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -126,6 +127,29 @@ def _calling_module_name(*, depth: int = 2) -> str:
 
 def _env_flag_enabled(key: str) -> bool:
     return str(os.getenv(key, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _certifi_ssl_context() -> Optional[ssl.SSLContext]:
+    try:
+        import certifi  # type: ignore
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        cafile = str(certifi.where() or "").strip()
+        if not cafile:
+            return None
+        return ssl.create_default_context(cafile=cafile)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _is_ssl_cert_verification_error(exc: urllib.error.URLError) -> bool:
+    reason = exc.reason
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return True
+    if isinstance(reason, ssl.SSLError):
+        return "CERTIFICATE_VERIFY_FAILED" in str(reason)
+    return False
 
 
 def _normalize_secret_name(name: str) -> str:
@@ -2660,12 +2684,28 @@ class _Http:
         if headers:
             req_headers.update(headers)
         req = urllib.request.Request(url, method=method, data=payload, headers=req_headers)
-        try:
-            with urllib.request.urlopen(req, timeout=int(timeout_seconds or 30)) as response:
+        timeout = int(timeout_seconds or 30)
+        attempted_certifi_fallback = False
+
+        def _urlopen_json(*, context: Optional[ssl.SSLContext] = None) -> Any:
+            with urllib.request.urlopen(req, timeout=timeout, context=context) as response:
                 if response.status == 204:
                     return None
                 raw = response.read().decode("utf-8")
                 return json.loads(raw) if raw else {}
+
+        try:
+            try:
+                return _urlopen_json()
+            except urllib.error.URLError as exc:
+                if isinstance(exc, urllib.error.HTTPError):
+                    raise
+                if _is_ssl_cert_verification_error(exc):
+                    certifi_context = _certifi_ssl_context()
+                    if certifi_context is not None:
+                        attempted_certifi_fallback = True
+                        return _urlopen_json(context=certifi_context)
+                raise
         except urllib.error.HTTPError as exc:
             details = exc.read().decode("utf-8", errors="replace")
             if _env_flag_enabled(DEBUG_HTTP_ERRORS_ENV):
@@ -2676,6 +2716,15 @@ class _Http:
             ) from exc
         except (TimeoutError, urllib.error.URLError) as exc:
             message = str(exc.reason) if isinstance(exc, urllib.error.URLError) else str(exc)
+            if isinstance(exc, urllib.error.URLError) and _is_ssl_cert_verification_error(exc):
+                message += (
+                    ". TLS certificate verification failed."
+                    + (
+                        " Retried with certifi CA bundle, but TLS verification still failed."
+                        if attempted_certifi_fallback
+                        else " Install or upgrade certifi to use a bundled CA bundle (pip install -U certifi)."
+                    )
+                )
             raise RuntimeError(f"{method} {path} failed (network): {message}") from exc
 
     def list_apps(self) -> dict[str, Any]:
