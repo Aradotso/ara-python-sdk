@@ -10,6 +10,7 @@ from .core import (
     _run_app_cli,
     run_auth_cli,
     run_runtime_cli,
+    run_update_cli,
 )
 
 
@@ -26,16 +27,19 @@ def _print_help(bin_name: str) -> None:
                 "Global command groups (no app script required):",
                 "  auth      login/whoami/logout/rotate for CLI auth",
                 "  runtime   runtime capabilities + tools/files/exec operations",
+                "  --update  self-update ara CLI to latest ara-sdk",
                 "",
                 "Examples:",
                 f"  {bin_name} deploy app.py",
                 f"  {bin_name} run app.py",
                 f"  {bin_name} auth login",
                 f"  {bin_name} runtime --help",
+                f"  {bin_name} --update",
                 "",
                 "More help:",
                 f"  {bin_name} <command> <automation_script.py> --help",
                 f"  {bin_name} auth --help",
+                f"  {bin_name} --update --help",
             ]
         )
     )
@@ -62,6 +66,9 @@ def main() -> None:
     bin_name = pathlib.Path(sys.argv[0]).name or "ara"
     if len(sys.argv) >= 2 and sys.argv[1] in {"-h", "--help", "help"}:
         _print_help(bin_name)
+        return
+    if len(sys.argv) >= 2 and sys.argv[1] in {"--update", "update"}:
+        run_update_cli(argv=sys.argv[2:])
         return
     if len(sys.argv) >= 2 and sys.argv[1] == "auth":
         if len(sys.argv) == 2:

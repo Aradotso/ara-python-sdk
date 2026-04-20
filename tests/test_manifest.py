@@ -676,6 +676,192 @@ def test_runtime_cli_files_download_sanitizes_server_filename(monkeypatch, tmp_p
     assert resolved_output.read_bytes() == b"hello"
 
 
+def test_self_update_plan_prefers_uv_tool_for_uv_managed_cli(monkeypatch):
+    monkeypatch.setattr(
+        core.shutil,
+        "which",
+        lambda name: "/usr/local/bin/uv" if name == "uv" else ("/usr/local/bin/pipx" if name == "pipx" else None),
+    )
+    monkeypatch.setattr(core, "_pipx_has_package", lambda *, pipx_bin, package: False)
+
+    plan = core._self_update_plan(
+        executable="/Users/me/.local/bin/ara",
+        python_executable="/Users/me/.local/share/uv/tools/ara-sdk/bin/python3",
+    )
+
+    assert plan[0] == ["/usr/local/bin/uv", "tool", "upgrade", "ara-sdk"]
+
+
+def test_self_update_plan_does_not_use_uv_install_for_non_uv_cli(monkeypatch):
+    monkeypatch.setattr(
+        core.shutil,
+        "which",
+        lambda name: "/usr/local/bin/uv" if name == "uv" else ("/usr/local/bin/pipx" if name == "pipx" else None),
+    )
+    monkeypatch.setattr(core, "_pipx_has_package", lambda *, pipx_bin, package: False)
+
+    plan = core._self_update_plan(
+        executable="/usr/local/bin/ara",
+        python_executable="/usr/local/bin/python3",
+    )
+
+    assert ["/usr/local/bin/uv", "tool", "upgrade", "ara-sdk"] not in plan
+    assert ["/usr/local/bin/pipx", "upgrade", "ara-sdk"] not in plan
+
+
+def test_self_update_plan_detects_uv_custom_tool_data_path(monkeypatch):
+    monkeypatch.setattr(
+        core.shutil,
+        "which",
+        lambda name: "/usr/local/bin/uv" if name == "uv" else None,
+    )
+    monkeypatch.setattr(core, "_pipx_has_package", lambda *, pipx_bin, package: False)
+
+    plan = core._self_update_plan(
+        executable="/opt/custom/tools/ara-sdk/bin/ara",
+        python_executable="/opt/custom/tools/ara-sdk/bin/python3",
+    )
+
+    assert plan[0] == ["/usr/local/bin/uv", "tool", "upgrade", "ara-sdk"]
+
+
+def test_self_update_plan_includes_pipx_when_ara_sdk_is_installed(monkeypatch):
+    monkeypatch.setattr(
+        core.shutil,
+        "which",
+        lambda name: "/usr/local/bin/pipx" if name == "pipx" else None,
+    )
+    monkeypatch.setattr(core, "_pipx_has_package", lambda *, pipx_bin, package: True)
+
+    plan = core._self_update_plan(
+        executable="/usr/local/bin/ara",
+        python_executable="/usr/local/bin/python3",
+    )
+
+    assert ["/usr/local/bin/pipx", "upgrade", "ara-sdk"] in plan
+
+
+def test_self_update_plan_uv_managed_excludes_pipx_fallback_even_if_pipx_has_package(monkeypatch):
+    monkeypatch.setattr(
+        core.shutil,
+        "which",
+        lambda name: "/usr/local/bin/uv" if name == "uv" else ("/usr/local/bin/pipx" if name == "pipx" else None),
+    )
+    monkeypatch.setattr(core, "_pipx_has_package", lambda *, pipx_bin, package: True)
+
+    plan = core._self_update_plan(
+        executable="/Users/me/.local/bin/ara",
+        python_executable="/Users/me/.local/share/uv/tools/ara-sdk/bin/python3",
+    )
+
+    assert plan[0] == ["/usr/local/bin/uv", "tool", "upgrade", "ara-sdk"]
+    assert ["/usr/local/bin/pipx", "upgrade", "ara-sdk"] not in plan
+
+
+def test_run_update_cli_dry_run_prints_strategy_plan(monkeypatch, capsys):
+    monkeypatch.setattr(core, "_self_update_plan", lambda *, executable, python_executable: [["uv", "tool", "upgrade"]])
+    monkeypatch.setattr(core.sys, "argv", ["ara", "--update"])
+
+    core.run_update_cli(["--dry-run"])
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["ok"] is True
+    assert output["dry_run"] is True
+    assert output["commands"] == [["uv", "tool", "upgrade"]]
+
+
+def test_run_update_cli_returns_success_on_first_passing_command(monkeypatch, capsys):
+    monkeypatch.setattr(
+        core,
+        "_self_update_plan",
+        lambda *, executable, python_executable: [["cmd-fail"], ["cmd-ok"]],
+    )
+    monkeypatch.setattr(core.sys, "argv", ["ara", "--update"])
+
+    calls: list[list[str]] = []
+
+    class _Completed:
+        def __init__(self, returncode: int, stdout: str, stderr: str):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def _fake_run(cmd, **kwargs):
+        assert kwargs["timeout"] == core.CLI_UPDATE_COMMAND_TIMEOUT_SECONDS
+        calls.append(list(cmd))
+        if cmd[0] == "cmd-fail":
+            return _Completed(1, "", "failed")
+        return _Completed(0, "ok", "")
+
+    monkeypatch.setattr(core.subprocess, "run", _fake_run)
+
+    core.run_update_cli([])
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["ok"] is True
+    assert output["command"] == ["cmd-ok"]
+    assert calls == [["cmd-fail"], ["cmd-ok"]]
+
+
+def test_run_update_cli_timeout_decodes_bytes_streams(monkeypatch, capsys):
+    monkeypatch.setattr(
+        core,
+        "_self_update_plan",
+        lambda *, executable, python_executable: [["cmd-timeout"], ["cmd-ok"]],
+    )
+    monkeypatch.setattr(core.sys, "argv", ["ara", "--update"])
+
+    class _Completed:
+        def __init__(self):
+            self.returncode = 0
+            self.stdout = "ok"
+            self.stderr = ""
+
+    def _fake_run(cmd, **kwargs):
+        if cmd[0] == "cmd-timeout":
+            raise core.subprocess.TimeoutExpired(
+                cmd=cmd,
+                timeout=kwargs["timeout"],
+                output=b"Resolving...\n",
+                stderr=b"Temporary failure\n",
+            )
+        return _Completed()
+
+    monkeypatch.setattr(core.subprocess, "run", _fake_run)
+
+    core.run_update_cli([])
+
+    payload = json.loads(capsys.readouterr().out)
+    timeout_attempt = payload["attempts"][0]
+    assert timeout_attempt["error"].startswith("TimeoutExpired:")
+    assert timeout_attempt["stdout"] == "Resolving..."
+    assert timeout_attempt["stderr"] == "Temporary failure"
+
+
+def test_run_update_cli_failure_prints_json_to_stderr(monkeypatch, capsys):
+    monkeypatch.setattr(
+        core,
+        "_self_update_plan",
+        lambda *, executable, python_executable: [["cmd-fail"]],
+    )
+    monkeypatch.setattr(core.sys, "argv", ["ara", "--update"])
+
+    class _Completed:
+        def __init__(self):
+            self.returncode = 1
+            self.stdout = ""
+            self.stderr = "failed"
+
+    monkeypatch.setattr(core.subprocess, "run", lambda cmd, **kwargs: _Completed())
+
+    with pytest.raises(SystemExit):
+        core.run_update_cli([])
+
+    stderr_payload = json.loads(capsys.readouterr().err)
+    assert stderr_payload["ok"] is False
+    assert "attempts" in stderr_payload
+
+
 def test_top_level_module_does_not_expose_legacy_symbols():
     for symbol in (
         "App",

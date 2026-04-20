@@ -87,6 +87,14 @@ ara runtime files download --path notes/draft.md --output ./draft-copy.md
 
 `ara runtime files *` targets your active personal session directly, so it does not take a `--session` flag.
 
+You can self-update the CLI with:
+
+```bash
+ara --update
+```
+
+The updater prefers global tool-manager installs (`uv`/`pipx`) when available, with `pip` fallback.
+
 
 ## Run maintained examples
 

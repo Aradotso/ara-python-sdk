@@ -16,6 +16,7 @@ import pathlib
 import re
 import secrets
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -35,6 +36,7 @@ DEFAULT_SUBAGENT_MAX_CONCURRENCY = 8
 DEFAULT_TIMEOUT_SECONDS = 120
 DEFAULT_MAX_RETRIES = 2
 DEFAULT_RETRY_BACKOFF_SECONDS = 5
+CLI_UPDATE_COMMAND_TIMEOUT_SECONDS = 120
 DEBUG_HTTP_ERRORS_ENV = "ARA_SDK_DEBUG_HTTP_ERRORS"
 DEFAULT_API_BASE_URL = "https://api.ara.so"
 CLI_CREDENTIALS_FILENAME = "credentials.json"
@@ -4551,6 +4553,189 @@ def _stream_logs_for_run_until_terminal_event(
         if log_file_handle is not None:
             log_file_handle.close()
         done_event.set()
+
+
+def _normalized_exec_path(raw: str) -> str:
+    return str(raw or "").strip().replace("\\", "/")
+
+
+def _pipx_has_package(*, pipx_bin: str, package: str) -> bool:
+    try:
+        result = subprocess.run(
+            [pipx_bin, "list", "--json"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    if result.returncode != 0:
+        return False
+    try:
+        payload = json.loads(str(result.stdout or "{}"))
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    venvs = payload.get("venvs")
+    return isinstance(venvs, dict) and str(package or "") in venvs
+
+
+def _self_update_plan(*, executable: str, python_executable: str) -> list[list[str]]:
+    exe_norm = _normalized_exec_path(executable)
+    py_norm = _normalized_exec_path(python_executable)
+    uv_bin = shutil.which("uv")
+    pipx_bin = shutil.which("pipx")
+    commands: list[list[str]] = []
+    # Intentionally match generic tool/venv markers so custom UV_DATA_HOME/PIPX_HOME
+    # layouts are still detected as manager-owned installs.
+    uv_managed = "/tools/ara-sdk/" in exe_norm or "/tools/ara-sdk/" in py_norm
+    pipx_managed = "/venvs/ara-sdk/" in exe_norm or "/venvs/ara-sdk/" in py_norm
+
+    # If the current CLI is managed by uv tools, use uv tool upgrade directly.
+    if uv_managed:
+        if uv_bin:
+            commands.append([uv_bin, "tool", "upgrade", "ara-sdk"])
+    # If the current CLI is managed by pipx, prefer pipx upgrade.
+    if pipx_managed:
+        if pipx_bin:
+            commands.append([pipx_bin, "upgrade", "ara-sdk"])
+
+    # For non-manager installs, pipx upgrade can still be a valid first attempt
+    # while pip remains the primary fallback. Avoid uv tool install here because
+    # it can create a parallel install instead of upgrading the active CLI.
+    if (
+        not uv_managed
+        and not pipx_managed
+        and pipx_bin
+        and _pipx_has_package(pipx_bin=pipx_bin, package="ara-sdk")
+    ):
+        commands.append([pipx_bin, "upgrade", "ara-sdk"])
+
+    pip_upgrade = [python_executable, "-m", "pip", "install", "--upgrade", "ara-sdk"]
+    commands.append(pip_upgrade)
+    # In non-venv contexts, user-site install can recover from permission failures.
+    if sys.prefix == sys.base_prefix:
+        commands.append([python_executable, "-m", "pip", "install", "--user", "--upgrade", "ara-sdk"])
+
+    deduped: list[list[str]] = []
+    seen: set[tuple[str, ...]] = set()
+    for cmd in commands:
+        key = tuple(cmd)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(cmd)
+    return deduped
+
+
+def run_update_cli(argv: Optional[list[str]] = None) -> None:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Update ara CLI to the latest ara-sdk version. "
+            "Prefers global tool-manager installs (uv/pipx) when available."
+        )
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print planned update commands without executing them.",
+    )
+    args = parser.parse_args(argv)
+
+    plan = _self_update_plan(executable=sys.argv[0], python_executable=sys.executable)
+
+    if args.dry_run:
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "dry_run": True,
+                    "commands": plan,
+                },
+                indent=2,
+            )
+        )
+        return
+
+    attempts: list[dict[str, Any]] = []
+    for cmd in plan:
+        try:
+            result = subprocess.run(
+                cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=CLI_UPDATE_COMMAND_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            attempts.append(
+                {
+                    "command": cmd,
+                    "ok": False,
+                    "error": f"TimeoutExpired: command exceeded {CLI_UPDATE_COMMAND_TIMEOUT_SECONDS}s",
+                    "stdout": (
+                        exc.stdout.decode("utf-8", errors="replace")
+                        if isinstance(exc.stdout, bytes)
+                        else exc.stdout or ""
+                    ).strip(),
+                    "stderr": (
+                        exc.stderr.decode("utf-8", errors="replace")
+                        if isinstance(exc.stderr, bytes)
+                        else exc.stderr or ""
+                    ).strip(),
+                }
+            )
+            continue
+        except Exception as exc:  # noqa: BLE001
+            attempts.append(
+                {
+                    "command": cmd,
+                    "ok": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            continue
+        attempts.append(
+            {
+                "command": cmd,
+                "ok": result.returncode == 0,
+                "returncode": int(result.returncode),
+                "stdout": str(result.stdout or "").strip(),
+                "stderr": str(result.stderr or "").strip(),
+            }
+        )
+        if result.returncode == 0:
+            print(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "message": "Ara CLI updated successfully.",
+                        "command": cmd,
+                        "attempts": attempts,
+                    },
+                    indent=2,
+                )
+            )
+            return
+
+    print(
+        json.dumps(
+            {
+                "ok": False,
+                "message": (
+                    "Automatic update failed for all strategies. "
+                    "Try manually: `uv tool upgrade ara-sdk` or "
+                    "`python -m pip install --upgrade ara-sdk`."
+                ),
+                "attempts": attempts,
+            },
+            indent=2,
+        ),
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
 
 
 def run_runtime_cli(argv: Optional[list[str]] = None) -> None:

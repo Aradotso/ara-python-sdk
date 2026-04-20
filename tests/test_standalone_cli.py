@@ -65,6 +65,7 @@ def test_standalone_cli_help_lists_minimal_command_surface(monkeypatch, capsys):
     assert "--message" not in out
     assert "auth      login/whoami/logout/rotate for CLI auth" in out
     assert "runtime   runtime capabilities + tools/files/exec operations" in out
+    assert "--update  self-update ara CLI to latest ara-sdk" in out
 
 
 def test_auth_group_prints_group_help_without_subcommand(monkeypatch):
@@ -119,6 +120,42 @@ def test_runtime_group_forwards_runtime_arguments(monkeypatch):
     sdk_main.main()
 
     assert captured["argv"] == ["tools", "available", "--session", "sess_123"]
+
+
+def test_update_flag_routes_to_update_cli(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _run_update_cli(argv=None):
+        captured["argv"] = list(argv or [])
+
+    monkeypatch.setattr(sdk_main, "run_update_cli", _run_update_cli)
+    monkeypatch.setattr(
+        sdk_main.sys,
+        "argv",
+        ["ara", "--update"],
+    )
+
+    sdk_main.main()
+
+    assert captured["argv"] == []
+
+
+def test_update_command_routes_to_update_cli_with_args(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _run_update_cli(argv=None):
+        captured["argv"] = list(argv or [])
+
+    monkeypatch.setattr(sdk_main, "run_update_cli", _run_update_cli)
+    monkeypatch.setattr(
+        sdk_main.sys,
+        "argv",
+        ["ara", "update", "--dry-run"],
+    )
+
+    sdk_main.main()
+
+    assert captured["argv"] == ["--dry-run"]
 
 
 def test_removed_global_groups_require_script_and_fail_usage(monkeypatch):
