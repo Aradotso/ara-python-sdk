@@ -34,8 +34,7 @@ def make_briefing(topic: str, audience: str) -> dict:
     return {"briefing": f"{topic.strip()} update prepared for {audience.strip()}."}
 
 
-ara.Automation(
+ara.Job(
     "metadata-tools-agent",
     system_instructions=SYSTEM_INSTRUCTIONS,
-    tools=[ping, utc_now, make_briefing],
 )

@@ -3,6 +3,7 @@
 from .core import (
     Automation,
     AraClient,
+    Job,
     connectors,
     env,
     secret,
@@ -12,6 +13,7 @@ from .core import (
 __all__ = [
     "Automation",
     "AraClient",
+    "Job",
     "connectors",
     "env",
     "secret",

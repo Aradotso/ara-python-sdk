@@ -5,8 +5,8 @@ import pytest
 from ara_sdk import __main__ as sdk_main
 
 
-def test_standalone_cli_discovers_minimal_automation_script(tmp_path, monkeypatch):
-    script = tmp_path / "automation.py"
+def test_standalone_cli_discovers_minimal_job_script(tmp_path, monkeypatch):
+    script = tmp_path / "job.py"
     script.write_text(
         "\n".join(
             [
@@ -16,9 +16,8 @@ def test_standalone_cli_discovers_minimal_automation_script(tmp_path, monkeypatc
                 "def send_email(to: str, subject: str, body: str) -> dict:",
                 "    return {'ok': True}",
                 "",
-                "ara.Automation(",
+                "ara.Job(",
                 "    'weekday-priority-agent',",
-                "    tools=[send_email],",
                 "    system_instructions='Send weekday digest.',",
                 ")",
             ]
@@ -48,9 +47,9 @@ def test_standalone_cli_discovers_minimal_automation_script(tmp_path, monkeypatc
     assert captured["default_command"] == "deploy"
 
 
-def test_standalone_cli_usage_mentions_automation_script(monkeypatch):
+def test_standalone_cli_usage_mentions_job_script(monkeypatch):
     monkeypatch.setattr(sdk_main.sys, "argv", ["ara"])
-    with pytest.raises(SystemExit, match=r"Usage: ara <command> <automation_script.py> \[args...\]"):
+    with pytest.raises(SystemExit, match=r"Usage: ara <command> <job_script.py> \[args...\]"):
         sdk_main.main()
 
 
@@ -60,7 +59,7 @@ def test_standalone_cli_help_lists_minimal_command_surface(monkeypatch, capsys):
     sdk_main.main()
 
     out = capsys.readouterr().out
-    assert "Automation commands (require <automation_script.py>):" in out
+    assert "Job commands (require <job_script.py>):" in out
     assert "deploy, up, run, logs" in out
     assert "--message" not in out
     assert "auth      login/whoami/logout/rotate for CLI auth" in out
@@ -161,5 +160,5 @@ def test_update_command_routes_to_update_cli_with_args(monkeypatch):
 def test_removed_global_groups_require_script_and_fail_usage(monkeypatch):
     for command in ("session", "automation", "connect", "ssh-proxy", "start", "status", "stop"):
         monkeypatch.setattr(sdk_main.sys, "argv", ["ara", command])
-        with pytest.raises(SystemExit, match=r"Usage: ara <command> <automation_script.py> \[args...\]"):
+        with pytest.raises(SystemExit, match=r"Usage: ara <command> <job_script.py> \[args...\]"):
             sdk_main.main()

@@ -15,8 +15,7 @@ def hello_world() -> dict:
     return {"ok": True, "message": "hello world", "utc_time": now_utc}
 
 
-ara.Automation(
+ara.Job(
     "hello-tool-agent",
     system_instructions="Use the hello_world tool when useful, then reply briefly.",
-    tools=[hello_world],
 )

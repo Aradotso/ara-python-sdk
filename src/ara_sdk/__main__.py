@@ -18,10 +18,10 @@ def _print_help(bin_name: str) -> None:
     print(
         "\n".join(
             [
-                f"Usage: {bin_name} <command> <automation_script.py> [args...]",
+                f"Usage: {bin_name} <command> <job_script.py> [args...]",
                 f"       {bin_name} <global-command> [args...]",
                 "",
-                "Automation commands (require <automation_script.py>):",
+                "Job commands (require <job_script.py>):",
                 "  deploy, up, run, logs",
                 "",
                 "Global command groups (no app script required):",
@@ -37,7 +37,7 @@ def _print_help(bin_name: str) -> None:
                 f"  {bin_name} --update",
                 "",
                 "More help:",
-                f"  {bin_name} <command> <automation_script.py> --help",
+                f"  {bin_name} <command> <job_script.py> --help",
                 f"  {bin_name} auth --help",
                 f"  {bin_name} --update --help",
             ]
@@ -59,7 +59,7 @@ def _discover_app(module: ModuleType):
     minimal_app = _pop_minimal_app()
     if minimal_app is not None and getattr(minimal_app, "_agents", None):
         return minimal_app
-    raise RuntimeError("No ara.Automation(...) declaration found in script")
+    raise RuntimeError("No ara.Job(...) or ara.Automation(...) declaration found in script")
 
 
 def main() -> None:
@@ -83,7 +83,7 @@ def main() -> None:
         run_runtime_cli(argv=sys.argv[2:])
         return
     if len(sys.argv) < 3:
-        raise SystemExit(f"Usage: {bin_name} <command> <automation_script.py> [args...]")
+        raise SystemExit(f"Usage: {bin_name} <command> <job_script.py> [args...]")
     command = sys.argv[1]
     script = pathlib.Path(sys.argv[2]).expanduser().resolve()
     if not script.exists():

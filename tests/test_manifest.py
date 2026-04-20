@@ -27,7 +27,7 @@ def _manifest_with_runtime(runtime_profile: dict) -> dict:
     }
 
 
-def test_minimal_automation_declaration_builds_manifest_without_app_variable():
+def test_minimal_job_declaration_builds_manifest_without_app_variable():
     core._pop_minimal_app()
 
     @core.tool
@@ -36,10 +36,9 @@ def test_minimal_automation_declaration_builds_manifest_without_app_variable():
         sender = core.secret("CRON_EMAIL_FROM")
         return {"ok": True, "from": sender}
 
-    core.Automation(
+    core.Job(
         "weekday-priority-agent",
         system_instructions="Send weekday priority digest.",
-        tools=[send_email],
     )
 
     app = core._pop_minimal_app()
@@ -47,22 +46,21 @@ def test_minimal_automation_declaration_builds_manifest_without_app_variable():
     manifest = app.manifest
     assert manifest["slug"] == "weekday-priority-agent"
     assert manifest["agent"]["agents"][0]["id"] == "weekday-priority-agent"
-    assert manifest["agent"]["agents"][0]["skills"] == ["send_email"]
+    assert "skills" not in manifest["agent"]["agents"][0]
     assert manifest["agent"]["tools"][0]["required_env"] == ["CRON_EMAIL_FROM"]
     assert manifest["interfaces"]["inherit_owner_tools"] is True
 
 
-def test_automation_connector_skills_compile_to_tool_privileges():
+def test_job_connector_skills_compile_to_tool_privileges():
     core._pop_minimal_app()
 
     @core.tool
     def summarize() -> dict:
         return {"ok": True}
 
-    core.Automation(
+    core.Job(
         "calendar-helper",
         system_instructions="Handle calendar requests.",
-        tools=[summarize],
         skills=[
             core.connectors.google_calendar.list_events,
             core.connectors.google_calendar.create_event,
@@ -80,16 +78,12 @@ def test_automation_connector_skills_compile_to_tool_privileges():
             "scopes": [],
         }
     ]
-    assert manifest["agent"]["agents"][0]["skills"] == [
-        "summarize",
-        "connector:googlecalendar:list_events",
-        "connector:googlecalendar:create_event",
-    ]
+    assert "skills" not in manifest["agent"]["agents"][0]
 
 
-def test_automation_connector_wildcard_overrides_specific_actions():
+def test_job_connector_wildcard_overrides_specific_actions():
     core._pop_minimal_app()
-    core.Automation(
+    core.Job(
         "calendar-wide",
         system_instructions="Handle calendar broadly.",
         skills=[
@@ -106,9 +100,9 @@ def test_automation_connector_wildcard_overrides_specific_actions():
     ]
 
 
-def test_automation_can_disable_connectors_explicitly():
+def test_job_can_disable_connectors_explicitly():
     core._pop_minimal_app()
-    core.Automation(
+    core.Job(
         "connectors-off",
         system_instructions="No connector usage.",
         allow_connector_tools=False,
@@ -122,7 +116,7 @@ def test_automation_can_disable_connectors_explicitly():
 
 def test_explicit_connector_skills_override_allow_connector_tools_false():
     core._pop_minimal_app()
-    core.Automation(
+    core.Job(
         "connectors-scoped",
         system_instructions="Use only Gmail send email.",
         allow_connector_tools=False,
@@ -136,6 +130,27 @@ def test_explicit_connector_skills_override_allow_connector_tools_false():
     assert manifest["interfaces"]["tool_privileges"] == [
         {"toolkit": "gmail", "allowed_actions": ["send_email"], "scopes": []}
     ]
+
+
+def test_automation_backward_compat_does_not_lose_tools():
+    core._pop_minimal_app()
+
+    @core.tool
+    def my_tool() -> dict:
+        return {"ok": True}
+
+    core.Automation(
+        "compat-job",
+        system_instructions="Test backward compat.",
+        tools=[my_tool],
+    )
+
+    app = core._pop_minimal_app()
+    assert app is not None
+    manifest = app.manifest
+    assert manifest["slug"] == "compat-job"
+    tool_names = [t["function"]["name"] for t in manifest["agent"]["tools"]]
+    assert "my_tool" in tool_names
 
 
 def test_from_env_uses_api_key(monkeypatch, tmp_path):
@@ -945,7 +960,7 @@ def test_minimal_singleton_resets_across_distinct_script_modules(tmp_path):
 
     core._pop_minimal_app()
 
-    script_one = tmp_path / "automation_one.py"
+    script_one = tmp_path / "job_one.py"
     script_one.write_text(
         "\n".join(
             [
@@ -953,14 +968,14 @@ def test_minimal_singleton_resets_across_distinct_script_modules(tmp_path):
                 "@ara.tool",
                 "def tool_one() -> dict:",
                 "    return {'ok': True}",
-                "ara.Automation('first-automation', tools=[tool_one])",
+                "ara.Job('first-job')",
             ]
         )
         + "\n",
         encoding="utf-8",
     )
 
-    script_two = tmp_path / "automation_two.py"
+    script_two = tmp_path / "job_two.py"
     script_two.write_text(
         "\n".join(
             [
@@ -968,7 +983,7 @@ def test_minimal_singleton_resets_across_distinct_script_modules(tmp_path):
                 "@ara.tool",
                 "def tool_two() -> dict:",
                 "    return {'ok': True}",
-                "ara.Automation('second-automation', tools=[tool_two])",
+                "ara.Job('second-job')",
             ]
         )
         + "\n",
@@ -980,6 +995,6 @@ def test_minimal_singleton_resets_across_distinct_script_modules(tmp_path):
     app = core._pop_minimal_app()
     assert app is not None
     manifest = app.manifest
-    assert manifest["slug"] == "second-automation"
+    assert manifest["slug"] == "second-job"
     tools = manifest["agent"]["tools"]
     assert [tool["function"]["name"] for tool in tools] == ["tool_two"]

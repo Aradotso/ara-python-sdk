@@ -4,7 +4,7 @@ set -euo pipefail
 echo "[ara-entrypoint] setup start"
 
 # Bare-minimum example:
-# - this file runs before the automation itself
+# - this file runs before the job itself
 # - keep it idempotent (safe to run multiple times)
 
 # Optional additions you can enable later:

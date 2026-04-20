@@ -15,9 +15,8 @@ def requests_version() -> dict:
     return {"ok": True, "requests_version": requests.__version__}
 
 
-ara.Automation(
+ara.Job(
     "entrypoint-agent",
     system_instructions="Use requests_version tool and reply with the installed version.",
-    tools=[requests_version],
     entrypoint="./05-entrypoint.sh",
 )

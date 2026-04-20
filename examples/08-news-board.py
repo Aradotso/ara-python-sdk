@@ -52,8 +52,7 @@ def refresh_news_board() -> dict:
     return {"ok": True, "path": str(news_path), "preview": markdown}
 
 
-app = ara.Automation(
+app = ara.Job(
     "news-board-agent",
     system_instructions=SYSTEM_INSTRUCTIONS,
-    tools=[refresh_news_board],
 )

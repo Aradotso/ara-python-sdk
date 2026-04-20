@@ -31,8 +31,8 @@ HTML = """<!doctype html>
 <html>
   <body style="font-family: Inter, sans-serif; max-width: 900px; margin: 40px auto;">
     <h1>Ara SDK Local Visual Console</h1>
-    <p>Click once to trigger the collab automation and render output below.</p>
-    <button id="run">Run automation</button>
+    <p>Click once to trigger the collab job and render output below.</p>
+    <button id="run">Run job</button>
     <pre id="out" style="white-space: pre-wrap; background: #f5f5f5; padding: 16px; border-radius: 12px;"></pre>
     <script>
       document.getElementById("run").onclick = async () => {

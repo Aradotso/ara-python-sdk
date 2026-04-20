@@ -66,8 +66,7 @@ def save_visual() -> dict:
     return {"ok": True, "path": str(html_path)}
 
 
-app = ara.Automation(
+app = ara.Job(
     "collab-studio-agent",
     system_instructions=SYSTEM_INSTRUCTIONS,
-    tools=[scout_headlines, write_digest, save_visual],
 )

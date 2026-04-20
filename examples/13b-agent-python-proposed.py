@@ -1,7 +1,7 @@
 import ara_sdk as ara
 
 # File contract for this proposal:
-# - One automation definition per file (selected by path in app.ara.so)
+# - One job definition per file (selected by path in app.ara.so)
 # - Optional entrypoint script is repo-relative
 # - entrypoint must live in the same directory (or a child directory) as this file
 # - Ara snapshots both file contents at pinned commit SHA for deterministic runs
@@ -18,6 +18,7 @@ def title_case(text: str) -> str:
     return " ".join(word[:1].upper() + word[1:].lower() for word in text.split())
 
 
+@ara.tool
 def send_email(to: str, subject: str, body: str) -> dict:
     sender = ara.secret("CRON_EMAIL_FROM")
     api_key = ara.secret("RESEND_API_KEY")
@@ -39,29 +40,27 @@ Create a concise plan with top tasks, blockers, and one focus recommendation.
 """
 
 
-ara.Automation(
+ara.Job(
     "weekday-priority-agent",
     system_instructions=SYSTEM_INSTRUCTIONS,
-    tools=[title_case, send_email],
     entrypoint="./myentrypointfile.sh",
 )
 
 
 # No schedule in code.
-# Cron/at/timezone are configured in app.ara.so automation UI.
+# Cron/at/timezone are configured in app.ara.so job UI.
 
 # No explicit run call.
 # Runtime chooses behavior from execution context:
-# - local developer run: executes selected automation in Ara sandbox/dev runtime
-# - Ara cloud/import context: registers and runs using configured automation target
+# - local developer run: executes the selected job in Ara sandbox/dev runtime
+# - Ara cloud/import context: registers and runs using the configured job target
 
 
 # Optional advanced knobs (only when needed):
 #
-# ara.Automation(
+# ara.Job(
 #     "weekday-priority-agent",
 #     system_instructions="...",
-#     tools=[title_case, send_email],
 #     entrypoint="./scripts/myentrypointfile.sh",  # same-dir or child-dir only
 #     execution={
 #         "retries": {"max_attempts": 3, "backoff_seconds": 30},
@@ -78,7 +77,7 @@ ara.Automation(
 #
 # 2) Minimal required surface area
 #    - Keep required args as small as possible for "freshman mode":
-#      Automation(id, tools=[...]).
+#      Job(id, ...).
 #    - Everything else is optional helper metadata.
 #
 # 3) Recommended helper args (optional, not required)
@@ -88,7 +87,7 @@ ara.Automation(
 #
 # 4) Tool definition model
 #    - Tools are regular Python functions (lowest-friction default).
-#    - @ara.tool is optional but useful for explicit intent and readability.
+#    - @ara.tool registers a function into the job runtime tool surface.
 #    - Function signature + type hints define the tool parameter schema.
 #    - Tool docstrings are optional; they improve model routing and reliability.
 #    - "Args:" sections are optional; recommended for better per-parameter context.
@@ -108,7 +107,7 @@ ara.Automation(
 #    - Commit the entrypoint script so runs are reproducible.
 #
 # 8) Deterministic execution contract
-#    - Automation file + entrypoint are snapshotted from a pinned commit SHA.
+#    - Job file + entrypoint are snapshotted from a pinned commit SHA.
 #    - Relative entrypoint paths are constrained to this file's directory subtree.
 #
 # 9) Local/cloud parity

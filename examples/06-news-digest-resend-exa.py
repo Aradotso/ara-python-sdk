@@ -131,8 +131,7 @@ def send_news_digest(subject: str, body: str) -> dict:
     return {"ok": True, "email_id": data.get("id"), "to": recipient}
 
 
-ara.Automation(
+ara.Job(
     "morning-news-digest-agent-v3",
     system_instructions=SYSTEM_INSTRUCTIONS,
-    tools=[fetch_news_digest, send_news_digest],
 )

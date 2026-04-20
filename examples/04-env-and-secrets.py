@@ -22,8 +22,7 @@ def read_runtime_config() -> dict:
     }
 
 
-ara.Automation(
+ara.Job(
     "env-secrets-agent",
     system_instructions="Use read_runtime_config and explain values in one short reply.",
-    tools=[read_runtime_config],
 )

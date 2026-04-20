@@ -32,8 +32,7 @@ def read_recent(limit: int = 3) -> dict:
     return {"ok": True, "recent": rows[-max(1, int(limit)) :], "count": len(rows)}
 
 
-app = ara.Automation(
+app = ara.Job(
     "file-journal-agent",
     system_instructions=SYSTEM_INSTRUCTIONS,
-    tools=[append_heartbeat, read_recent],
 )

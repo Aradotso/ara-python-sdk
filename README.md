@@ -2,11 +2,11 @@
 
 Ara is a managed platform for building and running long-lived AI agents in the cloud.
 
-The `ara-sdk` is the Python layer for defining those agents and tools in code using a minimal authoring model. Ara runs the cloud runtime and operations, while the SDK focuses on compact automation scripts.
+The `ara-sdk` is the Python layer for defining those agents and tools in code using a minimal authoring model. Ara runs the cloud runtime and operations, while the SDK focuses on compact job scripts.
 
 ## Overview
 
-To program on Ara, you compose workflows with two primitives: `ara.Automation(...)` (system behavior) and `@ara.tool` (custom callable behavior attached to that automation).
+To program on Ara, you compose workflows with two primitives: `ara.Job(...)` (system behavior) and `@ara.tool` (custom callable behavior registered into the app runtime).
 
 Runtime flow:
 
@@ -19,7 +19,7 @@ Runtime flow:
                         v
               +----------------------------------------------+
               |         Ara Cloud: 24/7 Agent Runtime        |
-              |  - Routes automation runs and tool calls     |
+              |  - Routes job runs and tool calls            |
               |  - Maintains runtime context and state       |
               |                                              |
               |  +------------------------+                  |
@@ -53,18 +53,25 @@ def utc_now() -> dict:
     from datetime import datetime, timezone
     return {"utc_time": datetime.now(timezone.utc).isoformat()}
 
-ara.Automation(
+ara.Job(
     "hello-hourly-agent",
     system_instructions=(
         "Reply with one short hello message and include UTC time. "
         "If linq_send_message is available and a phone route is paired, "
         "send the same message there once."
     ),
-    tools=[utc_now],
 )
 ```
 
-Connector tools are enabled by default. To disable connector access for an automation, pass `allow_connector_tools=False`.
+Connector tools are enabled by default. To disable connector access for a job, pass `allow_connector_tools=False`.
+
+Terminology:
+
+- `Jobs`: deployable execution declarations (`ara.Job(...)`).
+- `Tools`: callable capabilities (SDK Python tools, connector tools, built-in runtime tools).
+- `Connectors`: external integration toolkits (for example Gmail, Slack, Calendar).
+- `Secrets`: runtime credentials consumed by tool code (`ara.secret("KEY")`).
+- `API keys`: control-plane/runtime auth keys used by CLI/SDK (`ARA_API_KEY`, runtime/app keys).
 
 Non-interactive auth (no `ara auth login`) is supported via `ARA_API_KEY`:
 
@@ -103,15 +110,15 @@ Examples: [github.com/Aradotso/ara-python-sdk/tree/main/examples](https://github
 ## FAQ
 
 ### What is the difference between Ara and `ara-sdk`?
-Ara is the managed control/runtime plane (execution, lifecycle, policy, observability), while `ara-sdk` is the authoring layer for automation behavior (tools + instructions). You define Python app logic; Ara handles runtime operations you would otherwise run as custom infrastructure.
+Ara is the managed control/runtime plane (execution, lifecycle, policy, observability), while `ara-sdk` is the authoring layer for job behavior (tools + instructions). You define Python app logic; Ara handles runtime operations you would otherwise run as custom infrastructure.
 
 ### Does “24/7 runtime” mean I pay for permanently hot compute?
 Not inherently. The runtime is always available as the service boundary, but sandbox/task compute can activate on demand from schedules, events, and API calls. Practical cost and footprint depend on your trigger frequency and runtime policy. _Note: today usage is billed under your existing Pro or Ultra subscription._
 
-### How should I think about `Automation`, `@tool`, and `secret(...)`?
-Use `Automation(...)` as the top-level app declaration, `@tool` for deterministic capability execution, and `secret("KEY")` when a tool requires credentials. Schedules are configured in app.ara.so UI to avoid code/UI drift.
+### How should I think about `Job`, `@tool`, and `secret(...)`?
+Use `Job(...)` as the top-level app declaration, `@tool` for deterministic capability execution, and `secret("KEY")` when a tool requires credentials. Schedules are configured in app.ara.so UI to avoid code/UI drift.
 
-### How do connectors work in `Automation(...)`?
+### How do connectors work in `Job(...)`?
 Connector tools are enabled by default (`allow_connector_tools=True`). Set `allow_connector_tools=False` for strict mode, then explicitly scope allowed connector actions with `skills=[ara.connectors.<toolkit>[.<action>]]`.
 
 ### Do tools have to return a `dict`?
@@ -121,4 +128,4 @@ No. Tool functions can return any JSON-serializable value (`dict`, `list`, `str`
 Declare required credentials in code with `secret("KEY")` and provide values through Ara secret sync at deploy time (or pre-provisioned app secrets). Keep all secret values out of source control.
 
 ### Do I need public endpoints to use Ara?
-No. The minimal SDK is automation-first; public endpoint wiring is not part of this authoring surface.
+No. The minimal SDK is job-first; public endpoint wiring is not part of this authoring surface.

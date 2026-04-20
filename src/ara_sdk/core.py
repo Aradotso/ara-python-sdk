@@ -2022,42 +2022,46 @@ def tool(
     return decorator
 
 
-class Automation:
+def _merge_required_env_keys(app: _AutomationApp, required_env: Optional[list[str]]) -> None:
+    required_keys = _normalize_string_items(required_env)
+    if not required_keys:
+        return
+    existing_required = app._runtime_profile.get("__required_env_keys")
+    existing = _normalize_string_items(existing_required if isinstance(existing_required, list) else [])
+    app._runtime_profile["__required_env_keys"] = _normalize_string_items([*existing, *required_keys])
+
+
+class Job:
     def __init__(
         self,
         id: str,
         *,
         system_instructions: str = "",
-        tools: Optional[list[Callable[..., Any]]] = None,
         skills: Optional[list[Any]] = None,
         allow_connector_tools: bool = True,
         required_env: Optional[list[str]] = None,
         entrypoint: str = "",
         execution: Optional[dict[str, Any]] = None,
+        _app: Optional["_AutomationApp"] = None,
     ):
         resolved_id = str(id or "").strip()
         if not resolved_id:
-            raise ValueError("Automation(...) requires a non-empty id")
-        app = _ensure_minimal_app(
-            project_name=_automation_project_name(resolved_id),
-            owner_module=_calling_module_name(),
-        )
+            raise ValueError("Job(...) requires a non-empty id")
+        if _app is not None:
+            app = _app
+        else:
+            app = _ensure_minimal_app(
+                project_name=_automation_project_name(resolved_id),
+                owner_module=_calling_module_name(),
+            )
 
-        tool_skill_names: list[str] = []
-        for fn in tools or []:
-            if not callable(fn):
-                raise ValueError("Automation(..., tools=[...]) expects callables")
-            if not hasattr(fn, "__ara_tool__"):
-                app.tool()(fn)
-            tool_row = getattr(fn, "__ara_tool__", None)
-            if isinstance(tool_row, dict):
-                fn_block = tool_row.get("function") if isinstance(tool_row.get("function"), dict) else {}
-                tool_name = str(fn_block.get("name") or fn.__name__).strip()
-                if tool_name:
-                    tool_skill_names.append(tool_name)
         explicit_skill_names = _normalize_automation_skill_items(skills)
         connector_refs = _connector_refs_from_skill_items(explicit_skill_names)
-        skill_names = _normalize_string_items([*tool_skill_names, *explicit_skill_names])
+        non_connector_skill_names: list[str] = []
+        for item in explicit_skill_names:
+            if _parse_connector_skill_token(item):
+                continue
+            non_connector_skill_names.append(item)
         app._interfaces["inherit_owner_tools"] = bool(allow_connector_tools)
         if connector_refs:
             app._interfaces["inherit_owner_tools"] = True
@@ -2068,24 +2072,9 @@ class Automation:
 
         instructions_text = str(system_instructions or "").strip()
         if not instructions_text:
-            instructions_text = f"Run automation '{resolved_id}'."
+            instructions_text = f"Run job '{resolved_id}'."
 
-        required_keys = _normalize_string_items(required_env)
-        for fn in tools or []:
-            tool_row = getattr(fn, "__ara_tool__", None)
-            if isinstance(tool_row, dict):
-                required_keys.extend(
-                    _normalize_string_items(
-                        tool_row.get("required_env")
-                        if isinstance(tool_row.get("required_env"), list)
-                        else []
-                    )
-                )
-        required_keys = _normalize_string_items(required_keys)
-        if required_keys:
-            existing_required = app._runtime_profile.get("__required_env_keys")
-            existing = _normalize_string_items(existing_required if isinstance(existing_required, list) else [])
-            app._runtime_profile["__required_env_keys"] = _normalize_string_items([*existing, *required_keys])
+        _merge_required_env_keys(app, required_env)
 
         if entrypoint:
             startup = dict(app._runtime_profile.get("startup") or {})
@@ -2104,14 +2093,71 @@ class Automation:
             "__ara_source_override__",
             f"def _automation_entry(input: dict) -> str:\n    return {instructions_text!r}",
         )
-        app.agent(
-            id=resolved_id,
-            entrypoint=True,
-            skills=_normalize_string_items(skill_names),
-        )(_automation_entry)
+        agent_kwargs: dict[str, Any] = {}
+        normalized_agent_skills = _normalize_string_items(non_connector_skill_names)
+        if normalized_agent_skills:
+            agent_kwargs["skills"] = normalized_agent_skills
+        app.agent(id=resolved_id, entrypoint=True, **agent_kwargs)(_automation_entry)
 
         self.id = resolved_id
         self.app = app
+
+
+class Automation(Job):
+    """Backward-compatible alias for Job.
+
+    Prefer `ara.Job(...)` for new scripts.
+    """
+
+    def __init__(
+        self,
+        id: str,
+        *,
+        system_instructions: str = "",
+        tools: Optional[list[Callable[..., Any]]] = None,
+        skills: Optional[list[Any]] = None,
+        allow_connector_tools: bool = True,
+        required_env: Optional[list[str]] = None,
+        entrypoint: str = "",
+        execution: Optional[dict[str, Any]] = None,
+    ):
+        app = _ensure_minimal_app(
+            project_name=_automation_project_name(str(id or "").strip()),
+            owner_module=_calling_module_name(),
+        )
+
+        tool_skill_names: list[str] = []
+        required_keys = _normalize_string_items(required_env)
+        for fn in tools or []:
+            if not callable(fn):
+                raise ValueError("Automation(..., tools=[...]) expects callables")
+            if not hasattr(fn, "__ara_tool__"):
+                app.tool()(fn)
+            tool_row = getattr(fn, "__ara_tool__", None)
+            if isinstance(tool_row, dict):
+                fn_block = tool_row.get("function") if isinstance(tool_row.get("function"), dict) else {}
+                tool_name = str(fn_block.get("name") or fn.__name__).strip()
+                if tool_name:
+                    tool_skill_names.append(tool_name)
+                required_keys.extend(
+                    _normalize_string_items(
+                        tool_row.get("required_env")
+                        if isinstance(tool_row.get("required_env"), list)
+                        else []
+                    )
+                )
+
+        merged_skills = _normalize_string_items([*tool_skill_names, *_normalize_automation_skill_items(skills)])
+        super().__init__(
+            id,
+            system_instructions=system_instructions,
+            skills=merged_skills if merged_skills else None,
+            allow_connector_tools=allow_connector_tools,
+            required_env=_normalize_string_items(required_keys),
+            entrypoint=entrypoint,
+            execution=execution,
+            _app=app,
+        )
 
 
 def _read_dotenv(path: pathlib.Path) -> None:
@@ -5611,11 +5657,11 @@ def _run_app_cli(app: _AutomationApp | dict[str, Any], argv: Optional[list[str]]
                         break
             if not isinstance(target_agent, dict):
                 raise SystemExit(
-                    "Schedule flags require an Automation agent in app.py (no deployable agent found)."
+                    "Schedule flags require a Job agent in app.py (no deployable agent found)."
                 )
             target_agent_id = str(target_agent.get("id") or "").strip()
             if not target_agent_id:
-                raise SystemExit("Schedule flags require a non-empty agent id in Automation(...).")
+                raise SystemExit("Schedule flags require a non-empty agent id in Job(...).")
             schedule_spec: dict[str, Any] = {
                 "id": "cli-managed-schedule",
                 "run": {
@@ -5752,7 +5798,7 @@ def _run_app_cli(app: _AutomationApp | dict[str, Any], argv: Optional[list[str]]
 def _legacy_api_removed(name: str) -> RuntimeError:
     return RuntimeError(
         f"{name} is no longer supported in the minimal Ara SDK surface. "
-        "Use ara.Automation(...), @ara.tool, ara.secret(...), and ara.env(...)."
+        "Use ara.Job(...), @ara.tool, ara.secret(...), and ara.env(...)."
     )
 
 

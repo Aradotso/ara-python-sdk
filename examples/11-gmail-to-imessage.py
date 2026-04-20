@@ -7,7 +7,7 @@ import ara_sdk as ara
 # 4) ara run examples/11-gmail-to-imessage.py
 # 5) Check your iMessage — the latest email summary will arrive instantly.
 
-ara.Automation(
+ara.Job(
     "gmail-to-imessage",
     system_instructions=(
         "1. Use gmail_search_emails to find the single most recent email in the inbox. "
