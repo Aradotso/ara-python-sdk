@@ -1,4 +1,4 @@
-# Ara Python SDK
+# Ara Python SDK (deprecated)
 
 Ara is a managed platform for building and running long-lived AI agents in the cloud.
 
